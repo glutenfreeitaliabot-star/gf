@@ -1,0 +1,7 @@
+venv/
+__pycache__/
+*.pyc
+restaurants.db
+app_restaurants.csv
+.env
+
