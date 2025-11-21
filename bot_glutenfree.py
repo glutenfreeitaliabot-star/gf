@@ -3,6 +3,7 @@ import sqlite3
 import os
 from contextlib import closing
 from datetime import datetime
+from import_app_restaurants import import_app_restaurants
 from typing import Optional, List
 
 
@@ -1001,6 +1002,15 @@ def build_application():
 
 
 if __name__ == "__main__":
+    # Importa/ricarica i ristoranti dalla lista 'app'
+    print("🔄 Importo ristoranti da app_restaurants.csv...")
+    try:
+        import_app_restaurants()
+        print("✅ Import completato.")
+    except Exception as e:
+        print("⚠️ Errore durante l'import dei ristoranti:", e)
+
     application = build_application()
     print("🤖 GlutenFreeBot avviato...")
     application.run_polling()
+
