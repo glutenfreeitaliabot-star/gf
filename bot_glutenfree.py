@@ -177,9 +177,47 @@ def ensure_schema():
             )
             """
         )
+        
+        # Suggerimenti ristoranti dagli utenti (da approvare)
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS suggested_restaurants (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                city TEXT NOT NULL,
+                address TEXT,
+                notes TEXT,
+                created_at TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'new'
+            )
+            """
+        )
+
+        # Recensioni strutturate (per futuro uso avanzato)
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS restaurant_reviews (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                restaurant_id INTEGER NOT NULL,
+                source TEXT NOT NULL,
+                review_url TEXT,
+                review_date TEXT,
+                gluten_score REAL,
+                taste_score REAL,
+                service_score REAL,
+                price_score REAL,
+                overall_score REAL,
+                gluten_comment TEXT,
+                general_comment TEXT,
+                created_by_user_id INTEGER,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
 
         conn.commit()
-
+        
 
 def add_points(user_id: int, points: int):
     with closing(get_conn()) as conn:
