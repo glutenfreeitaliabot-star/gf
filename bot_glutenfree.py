@@ -1,6 +1,7 @@
 import math
 import sqlite3
 import os
+SCHEMA_VERSION = "v2-paginazione-suggested"
 from contextlib import closing
 from datetime import datetime
 from import_app_restaurants import import_app_restaurants
@@ -766,15 +767,23 @@ async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text, kb = build_nearby_page(user.id, lat, lon, page=0)
     if text is None:
         await update.message.reply_text(
-            "Al momento non ho ristoranti con coordinate vicino a te."
+            "Al momento non ho ristoranti con coordinate vicino a te.",
+            reply_markup=main_keyboard(),  # rimettiamo il menu principale
         )
         return
 
+    # 1) Messaggio con l'elenco e i bottoni inline (paginazione / dettagli)
     await update.message.reply_text(
         text,
         parse_mode="HTML",
         reply_markup=kb,
         disable_web_page_preview=True,
+    )
+
+    # 2) Secondo messaggio che ripristina la tastiera principale
+    await update.message.reply_text(
+        "Puoi usare di nuovo il menu qui sotto 👇",
+        reply_markup=main_keyboard(),
     )
 
 
@@ -1171,6 +1180,7 @@ def build_application():
 
 
 if __name__ == "__main__":
+    print(f"🚀 Avvio GlutenFreeBot – SCHEMA_VERSION = {SCHEMA_VERSION}")
     print("🔄 Importo ristoranti da app_restaurants.csv...")
     try:
         import_app_restaurants()
@@ -1181,3 +1191,4 @@ if __name__ == "__main__":
     application = build_application()
     print("🤖 GlutenFreeBot avviato...")
     application.run_polling()
+
