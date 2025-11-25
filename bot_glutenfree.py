@@ -33,7 +33,7 @@ ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
 
 DB_PATH = "restaurants.db"
 PAGE_SIZE = 5  # numero di ristoranti per pagina nelle liste
-SCHEMA_VERSION = "v3-paginazione-suggested-shop"
+SCHEMA_VERSION = "v2-paginazione-suggested-shop"
 
 # Stati per ConversationHandler "aggiungi ristorante"
 ADD_NAME, ADD_CITY, ADD_ADDRESS, ADD_NOTES = range(4)
@@ -53,14 +53,14 @@ SHOP_CATEGORIES = [
         "description": "Mix per pane, pizza, dolci e farine naturali senza glutine.",
         "items": [
             {
-                "name": "Mix Pane - Mix B Preparato per Pane e Impasti Lievitati senza Glutine 1020 G",
-                "badge": "Consigliato",
-                "url": "https://amzn.to/4rlfnnu",  # TODO
+                "name": "Mix pane/pizza senza glutine",
+                "badge": "Best seller",
+                "url": "https://www.amazon.it/INSERISCI_TUO_LINK1",  # TODO
             },
             {
-                "name": "Schär, Mix it! Universale, farina senza glutine",
-                "badge": "Consigliato",
-                "url": "Schär, Mix it! Universale, farina senza glutine",
+                "name": "Farina di riso fine",
+                "badge": "Base dispensa",
+                "url": "https://www.amazon.it/INSERISCI_TUO_LINK2",
             },
         ],
     },
