@@ -53,14 +53,14 @@ SHOP_CATEGORIES = [
         "description": "Mix per pane, pizza, dolci e farine naturali senza glutine.",
         "items": [
             {
-                "name": "Mix pane/pizza senza glutine",
+                "name": "Schär, Mix it! Universale",
                 "badge": "Best seller",
-                "url": "https://www.amazon.it/INSERISCI_TUO_LINK1",  # TODO
+                "url": "https://www.amazon.it/Universal-Miscela-Farine-senza-Glutine/dp/B00P4Y168W?crid=3EYI5OYC9RFIY&dib=eyJ2IjoiMSJ9.eZBayKiQvx7gUpzkjlM1dQcHBx8zH-W5iwm9BoPjSFmAO2D88JKoL2fj5UPvJMqsNSK-qdX2cioaQ1958D_L8qd6Qn_pGkQMm2buJBVgKba2NVw_kofLdP6hj5zGhA7Fm9drCTsPBuAJkYsYuTn6lDbJdDXeAoU4IQEOHCzbmphJrYQBnzjxrsEz14gUrHY8npfERBMxVfp9vj9JSx8cnx8rn1PSY7kdNArh56KrRexTjDu76AtE73mpLr8BHQgVdmrM0DMt9B9URdB5kKPpSGyfePEZFOxxuy7pNzEuq5k.5R05FMVnuMKrDzYB2Ei7A6d1o6Hoo5XttfTyBmLZr_Q&dib_tag=se&keywords=farina+senza+glutine&qid=1764073490&sprefix=farina+senza%2Cspecialty-aps%2C84&sr=8-1&linkCode=ll1&tag=glutenfreeita-21&linkId=1fcbe103563fee752a8a51ceb4dbc627&language=it_IT&ref_=as_li_ss_tl",  # TODO
             },
             {
-                "name": "Farina di riso fine",
+                "name": "CÉRÉAL PANE A FETTE - Senza Lattosio",
                 "badge": "Base dispensa",
-                "url": "https://www.amazon.it/INSERISCI_TUO_LINK2",
+                "url": "https://www.amazon.it/cassetta-lattosio-accompagnare-colazione-Fragrante/dp/B0714F2F77?__mk_it_IT=%C3%85M%C3%85%C5%BD%C3%95%C3%91&crid=19TW9DXS5OOCD&dib=eyJ2IjoiMSJ9.iRwE5Q_q5ZAsGDnks3cDKthYtQ6wm3atVzU7-f_Vtmwd89U5m8qiLLNGraP5NA7wTaCF27X7Oy_fmEXbaacQuQ8cz7_c5GIGZ2GORei1EwX67_fM556XGk-QnlPU9DiqVrPfQ-6D_iaIv_FkoUMC8W518J9Ot4L0f58b8wMkEXUSzNmqJNyBkgZqrVPchjx53XO7rnkICwpWiJkxnfnHVOc7bUyQqUP3qqC6uzj1f-VPdZyHx0dXsGuWLppU6FA_7Y85muvMNh7Dl8iuWfOb9CWmcSFkLE6waa-7yFfOZYs.LTQuJK5hcfm0VRCae3c2NQ3HDVjCgUOCwQ67XlHeqDg&dib_tag=se&keywords=cereal%2Bpane%2Ba%2Bfette%2Bsenza%2Bglutine&qid=1764073452&sprefix=cereal%2Bpane%2Ba%2Bfette%2Bsenza%2Bglutine%2Cspecialty-aps%2C74&sr=8-1&th=1&linkCode=ll1&tag=glutenfreeita-21&linkId=1ef2c149dcd6ed5e4d681eec290a0448&language=it_IT&ref_=as_li_ss_tl",
             },
         ],
     },
@@ -70,14 +70,14 @@ SHOP_CATEGORIES = [
         "description": "Snack veloci, barrette, biscotti e merendine gluten free.",
         "items": [
             {
-                "name": "Barrette senza glutine",
+                "name": "BE-KIND - Confezione Mista 6 Gusti",
                 "badge": "Per l'ufficio",
-                "url": "https://www.amazon.it/INSERISCI_TUO_LINK3",
+                "url": "https://www.amazon.it/Barretta-Confezione-diversi-Glutine-Barrette/dp/B09P3T2L2W?__mk_it_IT=%C3%85M%C3%85%C5%BD%C3%95%C3%91&crid=3KPF49FI6G1B1&dib=eyJ2IjoiMSJ9.ZYYZMQd4AF_STYjDCSPDCbO1XjF623qubFQ9nIKXhTEDZQNcKAiYJCq5KrDIKE-8aLpgHalJ3OslRYZNh7dTJYdVRhAlbFIuQ-42fE4WR26EEVpqSFs-yuGQAw0455UJqKu0mK8Pq_w65uW4S1KSMvjXnDAyuTLdDW8Qzq-FV_G4jL-HvnexDav25YLuGHg7F7fwTuUytnIT4Ssoi8zZUEAD2eEvHcsn-ZiEEgjwB6Pa1f6tij0tXoZrr_L1gSpGCtw8KivqnaNywqIyD4Ltfob3oHf4CFWH7x7Xrpzhuwo.5uQA79ot1l1nOhWFCFuHGpfqYgLNWkGedSv8dyzriZU&dib_tag=se&keywords=barrette%2Bsenza%2Bglutine&qid=1764073213&sprefix=barrette%2Bsenza%2Bglutine%2Cspecialty-aps%2C83&sr=8-1&th=1&linkCode=ll1&tag=glutenfreeita-21&linkId=cc7cd7d27bbc48f8c0331040138343bc&language=it_IT&ref_=as_li_ss_tl",
             },
             {
-                "name": "Biscotti senza glutine",
+                "name": "Mulino Bianco -  Riso con Gocce di Cioccolato",
                 "badge": "Top colazione",
-                "url": "https://www.amazon.it/INSERISCI_TUO_LINK4",
+                "url": "https://www.amazon.it/Mulino-Bianco-Biscotti-Frollini-Cioccolato/dp/B07FKN8YRS?__mk_it_IT=%C3%85M%C3%85%C5%BD%C3%95%C3%91&crid=1R4GUJ64LMEIA&dib=eyJ2IjoiMSJ9.fAxZAyDRVa6Y6INKulCOozP70wjfOzfINt3_LEdUSifYi2mxicZDJ3A25Aop7UYXGB5AyGKwOjg4aUS8zYHOqIImvQQ1Pj_3m6MhkNbZRDjGyR8Ye9KIid6WHabWvNWuYegc8zH0bjbHu8FVY_vP125_9ZyA0vyE2IGWBXJy5NqLbxCyuLoP2259l9SETamfFQTWk6SM-gCJGeEnoeUvMSU5yuFv5RG0sfyXuE5bk1WmIVfhDvZ-Fv6TCGyGgnFUMop8xqypl5fHf633PxwcSUZr3DNNxgVKLSom8tNNEXE.-mqklTjo6vwCaub5DZ5KxZ3orwHlsN47UnzDcqsUFXA&dib_tag=se&keywords=biscotti%2Bsenza%2Bglutine&qid=1764073235&sprefix=biscotti%2Bsenza%2Bglutine%2Cspecialty-aps%2C83&sr=8-2&th=1&linkCode=ll1&tag=glutenfreeita-21&linkId=568fe374476cf50073351cc83afe5cc0&language=it_IT&ref_=as_li_ss_tl",
             },
         ],
     },
