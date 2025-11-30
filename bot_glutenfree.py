@@ -705,6 +705,92 @@ async def handle_suggest_city(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
         except Exception:
             pass
+            
+# ==========================
+# STATS / USO BOT (solo admin)
+# ==========================
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+
+    # se è configurato ADMIN_CHAT_ID, limito a lui
+    if ADMIN_CHAT_ID and str(user.id) != str(ADMIN_CHAT_ID):
+        await update.message.reply_text("Questo comando è riservato all'amministratore del bot.")
+        return
+
+    with closing(get_conn()) as conn:
+        cur = conn.cursor()
+
+        # Totale eventi e utenti unici
+        cur.execute("SELECT COUNT(*), COUNT(DISTINCT user_id) FROM usage_events")
+        row = cur.fetchone()
+        total_events = row[0] or 0
+        total_users = row[1] or 0
+
+        # Eventi più usati
+        cur.execute(
+            """
+            SELECT event, COUNT(*) AS c
+            FROM usage_events
+            GROUP BY event
+            ORDER BY c DESC
+            LIMIT 10
+            """
+        )
+        events_rows = cur.fetchall()
+
+        # Città più cercate (search_city:<city>)
+        cur.execute(
+            """
+            SELECT event, COUNT(*) AS c
+            FROM usage_events
+            WHERE event LIKE 'search_city:%'
+            GROUP BY event
+            ORDER BY c DESC
+            LIMIT 10
+            """
+        )
+        city_rows = cur.fetchall()
+
+    # Format eventi
+    if events_rows:
+        events_lines = []
+        for ev, c in events_rows:
+            events_lines.append(f"• {ev}: {c}")
+        events_block = "\n".join(events_lines)
+    else:
+        events_block = "Nessun evento registrato."
+
+    # Format città
+    if city_rows:
+        city_counts = {}
+        for ev, c in city_rows:
+            # event tipo: "search_city:Bari"
+            parts = ev.split(":", 1)
+            if len(parts) == 2:
+                city = parts[1]
+            else:
+                city = ev
+            city_counts[city] = city_counts.get(city, 0) + c
+
+        top_cities = sorted(city_counts.items(), key=lambda x: x[1], reverse=True)[:5]
+        city_lines = [f"• {city}: {cnt}" for city, cnt in top_cities]
+        city_block = "\n".join(city_lines)
+    else:
+        city_block = "Nessuna ricerca città registrata."
+
+    msg = (
+        "<b>📊 Stats GlutenFreeBot</b>\n\n"
+        f"• Eventi totali: <b>{total_events}</b>\n"
+        f"• Utenti unici: <b>{total_users}</b>\n\n"
+        "<b>🔝 Eventi più usati</b>\n"
+        f"{events_block}\n\n"
+        "<b>🏙 Città più cercate</b>\n"
+        f"{city_block}"
+    )
+
+    await update.message.reply_text(msg, parse_mode="HTML")
+
 
 
 # ==========================
