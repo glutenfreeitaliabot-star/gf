@@ -1,11 +1,10 @@
 import math
-import os
 import sqlite3
+import os
 from contextlib import closing
 from datetime import datetime
-from typing import Optional, List
-
 from import_app_restaurants import import_app_restaurants
+from typing import Optional, List
 
 from telegram import (
     Update,
@@ -29,87 +28,17 @@ from telegram.ext import (
 # ==========================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
-
+ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
 DB_PATH = "restaurants.db"
-PAGE_SIZE = 5
-SCHEMA_VERSION = "v4-radius-type-filter"
 
-# Stati per ConversationHandler "aggiungi ristorante"
+PAGE_SIZE = 5  # Numero ristoranti per pagina
+
 ADD_NAME, ADD_CITY, ADD_ADDRESS, ADD_NOTES = range(4)
 
-# Memoria in RAM per gestire "aggiungi foto dopo"
-pending_photo_for_user = {}  # {user_id: restaurant_id}
-
+pending_photo_for_user = {}
 
 # ==========================
-# SHOP (Amazon affiliate)
-# ==========================
-
-SHOP_CATEGORIES = [
-    {
-        "id": "farine_mix",
-        "name": "🌾 Farine & Mix",
-        "description": "Mix per pane, pizza, dolci e farine naturali senza glutine.",
-        "items": [
-            {
-                "name": "Mix pane/pizza senza glutine",
-                "badge": "Best seller",
-                "url": "https://www.amazon.it/INSERISCI_TUO_LINK1?tag=glutenfreeita-21",
-            },
-            {
-                "name": "Farina di riso fine",
-                "badge": "Base dispensa",
-                "url": "https://www.amazon.it/INSERISCI_TUO_LINK2?tag=glutenfreeita-21",
-            },
-        ],
-    },
-    {
-        "id": "snack",
-        "name": "🍪 Snack & Merendine",
-        "description": "Snack veloci, barrette, biscotti e merendine gluten free.",
-        "items": [
-            {
-                "name": "Barrette senza glutine",
-                "badge": "Per l'ufficio",
-                "url": "https://www.amazon.it/INSERISCI_TUO_LINK3?tag=glutenfreeita-21",
-            },
-            {
-                "name": "Biscotti senza glutine",
-                "badge": "Top colazione",
-                "url": "https://www.amazon.it/INSERISCI_TUO_LINK4?tag=glutenfreeita-21",
-            },
-        ],
-    },
-    {
-        "id": "pane_piadine",
-        "name": "🥖 Pane, Piadine & Base Pizza",
-        "description": "Prodotti pronti per panini, piadine e pizze veloci.",
-        "items": [
-            {
-                "name": "Piadine senza glutine",
-                "badge": "Sempre in frigo",
-                "url": "https://www.amazon.it/INSERISCI_TUO_LINK5?tag=glutenfreeita-21",
-            },
-        ],
-    },
-    {
-        "id": "kit",
-        "name": "🎁 Kit prova & Starter Pack",
-        "description": "Box misti per chi vuole provare tanti prodotti diversi.",
-        "items": [
-            {
-                "name": "Box assaggio senza glutine",
-                "badge": "Idea regalo",
-                "url": "https://www.amazon.it/INSERISCI_TUO_LINK6?tag=glutenfreeita-21",
-            },
-        ],
-    },
-]
-
-
-# ==========================
-# UTILS DB
+# DB UTILS
 # ==========================
 
 def get_conn():
@@ -120,7 +49,6 @@ def ensure_schema():
     with closing(get_conn()) as conn:
         cur = conn.cursor()
 
-        # Tabella restaurants
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS restaurants (
@@ -133,66 +61,23 @@ def ensure_schema():
                 lat REAL,
                 lon REAL,
                 rating REAL,
-                last_update TEXT
+                last_update TEXT,
+                types TEXT
             )
             """
         )
 
-        # Preferiti
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS favorites (
                 user_id INTEGER NOT NULL,
                 restaurant_id INTEGER NOT NULL,
                 created_at TEXT NOT NULL,
-                PRIMARY KEY (user_id, restaurant_id)
+                PRIMARY PRIMARY KEY (user_id, restaurant_id)
             )
             """
         )
 
-        # Città seguite (per novità)
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS subscriptions (
-                user_id INTEGER NOT NULL,
-                city TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                PRIMARY KEY (user_id, city)
-            )
-            """
-        )
-
-        # Impostazioni utente (filtri)
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS user_settings (
-                user_id INTEGER PRIMARY KEY,
-                min_rating REAL
-            )
-            """
-        )
-
-        # Aggiungo colonna preferred_types se non esiste
-        cur.execute("PRAGMA table_info(user_settings)")
-        cols = [r[1] for r in cur.fetchall()]
-        if "preferred_types" not in cols:
-            cur.execute("ALTER TABLE user_settings ADD COLUMN preferred_types TEXT")
-
-        # Segnalazioni / errori
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS reports (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                restaurant_id INTEGER NOT NULL,
-                reason TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'new'
-            )
-            """
-        )
-
-        # Foto dei ristoranti
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS photos (
@@ -205,76 +90,22 @@ def ensure_schema():
             """
         )
 
-        # Gamification
         cur.execute(
             """
-            CREATE TABLE IF NOT EXISTS user_stats (
+            CREATE TABLE IF NOT EXISTS user_settings (
                 user_id INTEGER PRIMARY KEY,
-                points INTEGER NOT NULL DEFAULT 0,
-                title TEXT
+                min_rating REAL
             )
             """
         )
 
-        # Suggerimenti ristoranti (da approvare)
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS suggested_restaurants (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                name TEXT NOT NULL,
-                city TEXT NOT NULL,
-                address TEXT,
-                notes TEXT,
-                created_at TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'new'
-            )
-            """
-        )
-
-        # Recensioni strutturate (futuro)
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS restaurant_reviews (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                restaurant_id INTEGER NOT NULL,
-                source TEXT NOT NULL,
-                review_url TEXT,
-                review_date TEXT,
-                gluten_score REAL,
-                taste_score REAL,
-                service_score REAL,
-                price_score REAL,
-                overall_score REAL,
-                gluten_comment TEXT,
-                general_comment TEXT,
-                created_by_user_id INTEGER,
-                created_at TEXT NOT NULL
-            )
-            """
-        )
-
-        # Eventi di utilizzo per statistiche
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS usage_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                event_type TEXT NOT NULL,
-                city TEXT,
-                created_at TEXT NOT NULL
-            )
-            """
-        )
-
-        # Suggerimenti di città da analizzare
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS suggested_cities (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                city TEXT NOT NULL,
-                created_at TEXT NOT NULL
+                user_id INTEGER,
+                event TEXT,
+                created_at TEXT
             )
             """
         )
@@ -282,107 +113,417 @@ def ensure_schema():
         conn.commit()
 
 
-def add_points(user_id: int, points: int):
+def log_usage(user_id: int, event: str):
     with closing(get_conn()) as conn:
         cur = conn.cursor()
         cur.execute(
-            "INSERT INTO user_stats (user_id, points) VALUES (?, ?) "
-            "ON CONFLICT(user_id) DO UPDATE SET points = points + ?",
-            (user_id, points, points),
-        )
-        cur.execute("SELECT points FROM user_stats WHERE user_id = ?", (user_id,))
-        row = cur.fetchone()
-        total = row[0] if row else 0
-
-        if total >= 50:
-            title = "🦄 Gluten Master"
-        elif total >= 30:
-            title = "🏆 Top Contributor"
-        elif total >= 15:
-            title = "🎖️ Scout del Glutine"
-        elif total >= 5:
-            title = "🔍 Esploratore Gluten Free"
-        else:
-            title = "👤 Utente"
-
-        cur.execute(
-            "UPDATE user_stats SET title = ? WHERE user_id = ?",
-            (title, user_id),
+            "INSERT INTO usage_events (user_id, event, created_at) VALUES (?, ?, ?)",
+            (user_id, event, datetime.utcnow().isoformat()),
         )
         conn.commit()
 
 
-def get_user_stats(user_id: int):
-    with closing(get_conn()) as conn:
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT points, title FROM user_stats WHERE user_id = ?",
-            (user_id,),
-        )
-        row = cur.fetchone()
-        if not row:
-            return 0, "👤 Utente"
-        return row[0], row[1]
+def extract_categories(rows):
+    categories = set()
+    for r in rows:
+        types_raw = r[9] if len(r) > 9 else ""
+        for p in types_raw.split("|"):
+            p = p.strip().lower()
+            if p in ["restaurant", "bar", "cafe", "bakery", "meal_takeaway", "meal_delivery", "store"]:
+                categories.add(p)
+
+    order = ["restaurant", "bar", "cafe", "bakery", "meal_takeaway", "meal_delivery", "store"]
+    return [c for c in order if c in categories]
 
 
 def get_user_settings(user_id: int):
     with closing(get_conn()) as conn:
         cur = conn.cursor()
-        cur.execute(
-            "SELECT min_rating, preferred_types FROM user_settings WHERE user_id = ?",
-            (user_id,),
-        )
+        cur.execute("SELECT min_rating FROM user_settings WHERE user_id = ?", (user_id,))
         row = cur.fetchone()
-        if not row:
-            return {"min_rating": None, "preferred_types": None}
-        return {"min_rating": row[0], "preferred_types": row[1]}
+        return {"min_rating": row[0] if row else None}
 
 
 def set_user_min_rating(user_id: int, value: Optional[float]):
     with closing(get_conn()) as conn:
         cur = conn.cursor()
         if value is None:
-            cur.execute("UPDATE user_settings SET min_rating = NULL WHERE user_id = ?", (user_id,))
+            cur.execute("DELETE FROM user_settings WHERE user_id = ?", (user_id,))
         else:
             cur.execute(
-                "INSERT INTO user_settings (user_id, min_rating) VALUES (?, ?) "
-                "ON CONFLICT(user_id) DO UPDATE SET min_rating = ?",
+                """
+                INSERT INTO user_settings (user_id, min_rating)
+                VALUES (?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET min_rating = ?
+                """,
                 (user_id, value, value),
             )
         conn.commit()
+# ==========================
+# LOGICA RISTORANTI
+# ==========================
+
+def haversine_km(lat1, lon1, lat2, lon2):
+    if None in (lat1, lon1, lat2, lon2):
+        return None
+    R = 6371.0
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = (
+        math.sin(dphi / 2) ** 2
+        + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
+    )
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
-def set_user_type_filter(user_id: int, value: Optional[str]):
+def eval_risk(notes: str) -> str:
+    if not notes:
+        return "⚪️ Info non sufficiente"
+
+    t = notes.lower()
+
+    safe = ["no contaminazione", "senza contaminazione", "cucina separata", "forno dedicato", "aic"]
+    danger = ["contaminazione", "tracce di glutine", "stesso forno", "stessa friggitrice"]
+
+    if any(k in t for k in safe):
+        return "🟢 Attenzione alta al senza glutine"
+    if any(k in t for k in danger):
+        return "🟠 Possibile contaminazione, chiedi info al locale"
+    return "🟡 Verifica sul posto"
+
+
+# --------------------------
+# QUERY RISTORANTI
+# --------------------------
+
+def query_by_city(city: str, user_id: int, category: str = None):
+    settings = get_user_settings(user_id)
+    min_rating = settings.get("min_rating")
+
     with closing(get_conn()) as conn:
         cur = conn.cursor()
-        if value is None:
-            cur.execute("UPDATE user_settings SET preferred_types = NULL WHERE user_id = ?", (user_id,))
+        if category:
+            sql = """
+            SELECT id, name, city, address, notes, rating, lat, lon, last_update, types
+            FROM restaurants
+            WHERE LOWER(city) = LOWER(?)
+              AND LOWER(types) LIKE ?
+            ORDER BY rating DESC, name ASC
+            """
+            cur.execute(sql, (city, f"%{category}%"))
         else:
-            cur.execute(
-                "INSERT INTO user_settings (user_id, preferred_types) VALUES (?, ?) "
-                "ON CONFLICT(user_id) DO UPDATE SET preferred_types = ?",
-                (user_id, value, value),
-            )
-        conn.commit()
+            sql = """
+            SELECT id, name, city, address, notes, rating, lat, lon, last_update, types
+            FROM restaurants
+            WHERE LOWER(city) = LOWER(?)
+            ORDER BY rating DESC, name ASC
+            """
+            cur.execute(sql, (city,))
+
+        rows = cur.fetchall()
+
+    if min_rating is not None:
+        rows = [r for r in rows if (r[5] is None or r[5] >= min_rating)]
+
+    return rows
 
 
-def add_favorite(user_id: int, restaurant_id: int):
+def query_nearby(lat, lon, user_id, max_distance_km=None):
+    settings = get_user_settings(user_id)
+    min_rating = settings.get("min_rating")
+
     with closing(get_conn()) as conn:
         cur = conn.cursor()
         cur.execute(
-            "INSERT OR IGNORE INTO favorites (user_id, restaurant_id, created_at) "
-            "VALUES (?, ?, ?)",
-            (user_id, restaurant_id, datetime.utcnow().isoformat()),
+            """
+            SELECT id, name, city, address, notes, rating, lat, lon, last_update, types
+            FROM restaurants
+            WHERE lat IS NOT NULL AND lon IS NOT NULL
+            """
         )
-        conn.commit()
+        rows = cur.fetchall()
 
+    results = []
+    for r in rows:
+        dist = haversine_km(lat, lon, r[6], r[7])
+        if dist is None:
+            continue
+        if max_distance_km and dist > max_distance_km:
+            continue
+        if min_rating is not None and r[5] is not None and r[5] < min_rating:
+            continue
+
+        results.append((dist, r))
+
+    results.sort(key=lambda x: x[0])
+    return [r[1] for r in results]
+
+
+# --------------------------
+# FORMATTING
+# --------------------------
+
+def format_restaurant_row(row, user_location=None):
+    rid, name, city, address, notes, rating, lat, lon, last_update, types = row
+
+    distance_str = ""
+    if user_location and lat and lon:
+        d = haversine_km(user_location[0], user_location[1], lat, lon)
+        if d:
+            distance_str = f"\n📏 Distanza: {d:.1f} km"
+
+    rating_str = f"{rating:.1f}⭐" if rating else "n.d."
+    risk = eval_risk(notes or "")
+
+    maps = f"https://www.google.com/maps/search/?api=1&query={name.replace(' ','+')}+{city}"
+
+    text = (
+        f"🍽 <b>{name}</b>\n"
+        f"📍 {city} – {address or '-'}\n"
+        f"⭐ Rating: {rating_str}\n"
+        f"{distance_str}\n\n"
+        f"<b>Note:</b> {notes or '—'}\n"
+        f"<b>Rischio:</b> {risk}\n"
+        f"\n🌍 <a href=\"{maps}\">Apri Google Maps</a>"
+    )
+
+    return text, rid
+
+
+# --------------------------
+# PAGINE RISULTATI (con categoria)
+# --------------------------
+
+def build_city_page(user_id: int, city: str, page: int, category: str = None):
+    rows = query_by_city(city, user_id, category)
+    if not rows:
+        return None, None
+
+    total = len(rows)
+    total_pages = (total + PAGE_SIZE - 1) // PAGE_SIZE
+    page = max(0, min(page, total_pages - 1))
+
+    start = page * PAGE_SIZE
+    end = start + PAGE_SIZE
+    subset = rows[start:end]
+
+    cat_txt = f" (categoria <b>{category}</b>)" if category else ""
+    msg = [f"🔎 Ho trovato <b>{total}</b> locali a <b>{city}</b>{cat_txt} — Pagina {page+1}/{total_pages}:\n"]
+
+    kb_rows = []
+
+    for i, r in enumerate(subset, start=start + 1):
+        rid = r[0]
+        rating_str = f"{r[5]:.1f}⭐" if r[5] else "n.d."
+        msg.append(f"{i}. {r[1]} – {rating_str}")
+        kb_rows.append([InlineKeyboardButton(f"Dettagli {i}", callback_data=f"details:{rid}")])
+
+    nav = []
+    cat_encoded = category if category else "ALL"
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅️", callback_data=f"page:{city}:{page-1}:{cat_encoded}"))
+    if page < total_pages - 1:
+        nav.append(InlineKeyboardButton("➡️", callback_data=f"page:{city}:{page+1}:{cat_encoded}"))
+
+    if nav:
+        kb_rows.append(nav)
+
+    kb = InlineKeyboardMarkup(kb_rows)
+    return "\n".join(msg), kb
+
+# ==========================
+# KEYBOARD PRINCIPALE
+# ==========================
+
+def main_keyboard():
+    return ReplyKeyboardMarkup(
+        [
+            ["🔍 Cerca per città", "📍 Vicino a me"],
+            ["⭐ I miei preferiti", "🛒 Shop"],
+            ["⚙️ Filtri"]
+        ],
+        resize_keyboard=True,
+    )
+
+
+# ==========================
+# START & HELP
+# ==========================
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    log_usage(user.id, "start")
+
+    await update.message.reply_text(
+        f"Ciao {user.first_name}!\n\n"
+        "Benvenuto in <b>GlutenFreeBot</b> 🧡\n"
+        "Trova ristoranti affidabili e prodotti senza glutine.",
+        parse_mode="HTML",
+        reply_markup=main_keyboard()
+    )
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Comandi disponibili:\n"
+        "• Cerca per città\n"
+        "• Cerca vicino a te\n"
+        "• Preferiti ⭐\n"
+        "• Shop Amazon 🛒",
+        reply_markup=main_keyboard()
+    )
+
+
+# ==========================
+# RICERCA PER CITTÀ
+# ==========================
+
+async def search_city(update: Update, context: ContextTypes.DEFAULT_TYPE, city_text: str):
+    user = update.effective_user
+    city = city_text.strip()
+
+    log_usage(user.id, f"search_city:{city}")
+
+    rows = query_by_city(city, user.id, category=None)
+    if not rows:
+        await update.message.reply_text(
+            f"Nessun ristorante trovato per <b>{city}</b>.",
+            parse_mode="HTML"
+        )
+        return
+
+    # Estrai categorie dinamiche
+    cats = extract_categories(rows)
+
+    if cats:
+        buttons = [[InlineKeyboardButton(c.title(), callback_data=f"cat:{city}:{c}")]
+                   for c in cats]
+        buttons.append([InlineKeyboardButton("Mostra tutti", callback_data=f"cat:{city}:ALL")])
+
+        await update.message.reply_text(
+            f"Trovati <b>{len(rows)}</b> locali a <b>{city}</b>.\n"
+            "Seleziona una categoria:",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
+        return
+
+    # Se nessuna categoria → mostra tutto
+    text, kb = build_city_page(user.id, city, page=0, category=None)
+    await update.message.reply_text(text, parse_mode="HTML", reply_markup=kb)
+
+
+# ==========================
+# HANDLE TEXT (menu)
+# ==========================
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    user = update.effective_user
+
+    if text == "🔍 Cerca per città":
+        log_usage(user.id, "menu_search_city")
+        context.user_data["awaiting_city_search"] = True
+        await update.message.reply_text("Scrivi il nome della città:")
+        return
+
+    if context.user_data.get("awaiting_city_search"):
+        context.user_data["awaiting_city_search"] = False
+        return await search_city(update, context, text)
+
+    # ---- VICINO A ME ----
+    if text == "📍 Vicino a me":
+        log_usage(user.id, "menu_nearby")
+        await update.message.reply_text(
+            "Scegli il raggio di ricerca:",
+            reply_markup=ReplyKeyboardMarkup(
+                [["1 km", "3 km"], ["5 km", "10 km"]],
+                resize_keyboard=True,
+                one_time_keyboard=True
+            )
+        )
+        context.user_data["awaiting_radius"] = True
+        return
+
+    # scelta raggio
+    if context.user_data.get("awaiting_radius") and text.endswith("km"):
+        r = int(text.split()[0])
+        context.user_data["nearby_radius_km"] = r
+        context.user_data["awaiting_radius"] = False
+
+        await update.message.reply_text(
+            f"Raggio impostato a {r} km.\nOra inviami la posizione 📍",
+            reply_markup=ReplyKeyboardMarkup(
+                [[KeyboardButton("Invia posizione 📍", request_location=True)]],
+                resize_keyboard=True,
+                one_time_keyboard=True
+            )
+        )
+        return
+
+    if text == "⭐ I miei preferiti":
+        return await my_favorites(update, context)
+
+    if text == "⚙️ Filtri":
+        return await show_filters(update, context)
+
+    if text == "🛒 Shop":
+        return await show_shop(update, context)
+
+    # fallback
+    await update.message.reply_text(
+        "Non ho capito. Usa il menu:",
+        reply_markup=main_keyboard()
+    )
+
+
+# ==========================
+# VICINO A ME
+# ==========================
+
+async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    log_usage(user.id, "location_sent")
+
+    loc = update.message.location
+    lat, lon = loc.latitude, loc.longitude
+
+    radius = context.user_data.get("nearby_radius_km", 5)
+    rows = query_nearby(lat, lon, user.id, max_distance_km=radius)
+
+    if not rows:
+        await update.message.reply_text("Nessun locale trovato entro il raggio scelto.")
+        return
+
+    await update.message.reply_text(
+        f"Trovati <b>{len(rows)}</b> locali entro {radius} km:",
+        parse_mode="HTML",
+        reply_markup=main_keyboard()
+    )
+
+    for r in rows[:15]:
+        text, rid = format_restaurant_row(r, user_location=(lat, lon))
+        kb = InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("⭐ Preferito", callback_data=f"fav:{rid}")],
+                [InlineKeyboardButton("📷 Aggiungi foto", callback_data=f"photo:{rid}")]
+            ]
+        )
+        await update.message.reply_text(text, parse_mode="HTML", reply_markup=kb)
+
+
+# ==========================
+# PREFERITI
+# ==========================
 
 def get_favorites(user_id: int):
     with closing(get_conn()) as conn:
         cur = conn.cursor()
         cur.execute(
             """
-            SELECT r.id, r.name, r.city, r.address, r.notes, r.rating, r.lat, r.lon
+            SELECT r.id, r.name, r.city, r.address, r.notes, r.rating, r.lat, r.lon, r.last_update, r.types
             FROM favorites f
             JOIN restaurants r ON r.id = f.restaurant_id
             WHERE f.user_id = ?
@@ -393,1266 +534,107 @@ def get_favorites(user_id: int):
         return cur.fetchall()
 
 
-def subscribe_city(user_id: int, city: str):
-    with closing(get_conn()) as conn:
-        cur = conn.cursor()
-        cur.execute(
-            """
-            INSERT OR IGNORE INTO subscriptions (user_id, city, created_at)
-            VALUES (?, ?, ?)
-            """,
-            (user_id, city, datetime.utcnow().isoformat()),
-        )
-        conn.commit()
-
-
-def get_subscriptions(user_id: int):
-    with closing(get_conn()) as conn:
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT city FROM subscriptions WHERE user_id = ? ORDER BY city",
-            (user_id,),
-        )
-        return [row[0] for row in cur.fetchall()]
-
-
-def add_report(user_id: int, restaurant_id: int, reason: str):
-    with closing(get_conn()) as conn:
-        cur = conn.cursor()
-        cur.execute(
-            """
-            INSERT INTO reports (user_id, restaurant_id, reason, created_at, status)
-            VALUES (?, ?, ?, ?, 'new')
-            """,
-            (user_id, restaurant_id, reason, datetime.utcnow().isoformat()),
-        )
-        conn.commit()
-
-
-def add_photo_record(user_id: int, restaurant_id: int, file_id: str):
-    with closing(get_conn()) as conn:
-        cur = conn.cursor()
-        cur.execute(
-            """
-            INSERT INTO photos (restaurant_id, file_id, user_id, created_at)
-            VALUES (?, ?, ?, ?)
-            """,
-            (restaurant_id, file_id, user_id, datetime.utcnow().isoformat()),
-        )
-        conn.commit()
-
-
-def get_photos_for_restaurant(restaurant_id: int):
-    with closing(get_conn()) as conn:
-        cur = conn.cursor()
-        cur.execute(
-            """
-            SELECT file_id FROM photos
-            WHERE restaurant_id = ?
-            ORDER BY created_at DESC
-            LIMIT 3
-            """,
-            (restaurant_id,),
-        )
-        return [row[0] for row in cur.fetchall()]
-
-
-def add_suggested_restaurant(user_id: int, name: str, city: str, address: str, notes: str):
-    with closing(get_conn()) as conn:
-        cur = conn.cursor()
-        cur.execute(
-            """
-            INSERT INTO suggested_restaurants
-                (user_id, name, city, address, notes, created_at, status)
-            VALUES (?, ?, ?, ?, ?, ?, 'new')
-            """,
-            (user_id, name, city, address, notes, datetime.utcnow().isoformat()),
-        )
-        conn.commit()
-
-
-def add_suggested_city(user_id: int, city: str):
-    with closing(get_conn()) as conn:
-        cur = conn.cursor()
-        cur.execute(
-            """
-            INSERT INTO suggested_cities (user_id, city, created_at)
-            VALUES (?, ?, ?)
-            """,
-            (user_id, city, datetime.utcnow().isoformat()),
-        )
-        conn.commit()
-
-
-def log_usage(user_id: int, event_type: str, city: Optional[str] = None):
-    with closing(get_conn()) as conn:
-        cur = conn.cursor()
-        cur.execute(
-            """
-            INSERT INTO usage_events (user_id, event_type, city, created_at)
-            VALUES (?, ?, ?, ?)
-            """,
-            (user_id, event_type, city, datetime.utcnow().isoformat()),
-        )
-        conn.commit()
-
-
-# ==========================
-# LOGICA RISTORANTI
-# ==========================
-
-def eval_risk(notes: str) -> str:
-    if not notes:
-        return "⚪️ Info non sufficiente"
-
-    text = notes.lower()
-
-    high_keys = [
-        "contaminazione",
-        "tracce di glutine",
-        "non garantito",
-        "stesso forno",
-        "stessa friggitrice",
-    ]
-    safe_keys = [
-        "no contaminazione",
-        "senza contaminazione",
-        "cucina separata",
-        "forno dedicato",
-        "aic",
-        "certificato",
-    ]
-
-    if any(k in text for k in safe_keys):
-        return "🟢 Attenzione alta al senza glutine"
-    if any(k in text for k in high_keys):
-        return "🟠 Possibile contaminazione, chiedi bene al locale"
-    return "🟡 Verifica sul posto, info non chiara"
-
-
-def haversine_km(lat1, lon1, lat2, lon2):
-    if None in (lat1, lon1, lat2, lon2):
-        return None
-
-    R = 6371.0
-    phi1 = math.radians(lat1)
-    phi2 = math.radians(lat2)
-    dphi = math.radians(lat2 - lat1)
-    dlambda = math.radians(lon2 - lon1)
-
-    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(
-        dlambda / 2
-    ) ** 2
-    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-    return R * c
-
-
-def encode_city(city: str) -> str:
-    return city.replace(" ", "_")
-
-
-def decode_city(s: str) -> str:
-    return s.replace("_", " ")
-
-
-def match_type_filter(types_str: str, filter_code: Optional[str]) -> bool:
-    """
-    types_str: stringa pipe-separated tipo "bar|cafe|establishment|food|restaurant"
-    filter_code: None / 'bar' / 'bakery' / 'cafe' / 'takeaway'
-    """
-    if not filter_code or filter_code == "all":
-        return True
-
-    tokens = (types_str or "").lower().split("|")
-
-    if filter_code == "bar":
-        return "bar" in tokens or "night_club" in tokens
-    if filter_code == "bakery":
-        return "bakery" in tokens
-    if filter_code == "cafe":
-        return "cafe" in tokens
-    if filter_code == "takeaway":
-        return "meal_takeaway" in tokens or "meal_delivery" in tokens
-
-    # fallback: se non riconosciamo il filtro, non escludiamo nulla
-    return True
-
-
-def query_by_city(city: str, user_id: int):
-    settings = get_user_settings(user_id)
-    min_rating = settings.get("min_rating")
-    preferred_types = settings.get("preferred_types")
-
-    with closing(get_conn()) as conn:
-        cur = conn.cursor()
-        sql = """
-        SELECT id, name, city, address, notes, rating, lat, lon, last_update
-        FROM restaurants
-        WHERE LOWER(city) = LOWER(?)
-        ORDER BY rating DESC, name ASC
-        """
-        cur.execute(sql, (city,))
-        rows = cur.fetchall()
-
-        # Mappa id -> types per filtro tipologia
-        if preferred_types:
-            cur.execute(
-                """
-                SELECT id, types
-                FROM restaurants
-                WHERE LOWER(city) = LOWER(?)
-                """,
-                (city,),
-            )
-            trows = cur.fetchall()
-            type_map = {rid: (t or "") for rid, t in trows}
-        else:
-            type_map = {}
-
-    # Filtro rating
-    if min_rating is not None:
-        rows = [r for r in rows if (r[5] is None or r[5] >= min_rating)]
-
-    # Filtro tipologia
-    if preferred_types:
-        rows = [
-            r
-            for r in rows
-            if match_type_filter(type_map.get(r[0], ""), preferred_types)
-        ]
-
-    return rows
-
-
-def query_nearby(
-    lat: float,
-    lon: float,
-    user_id: int,
-    max_results: int = 50,
-    max_distance_km: Optional[float] = None,
-):
-    settings = get_user_settings(user_id)
-    min_rating = settings.get("min_rating")
-    preferred_types = settings.get("preferred_types")
-
-    with closing(get_conn()) as conn:
-        cur = conn.cursor()
-        cur.execute(
-            """
-            SELECT id, name, city, address, notes, rating, lat, lon, last_update
-            FROM restaurants
-            WHERE lat IS NOT NULL AND lon IS NOT NULL
-            """
-        )
-        rows = cur.fetchall()
-
-        # Mappa id -> types
-        if preferred_types:
-            cur.execute(
-                """
-                SELECT id, types
-                FROM restaurants
-                WHERE lat IS NOT NULL AND lon IS NOT NULL
-                """
-            )
-            trows = cur.fetchall()
-            type_map = {rid: (t or "") for rid, t in trows}
-        else:
-            type_map = {}
-
-    enriched = []
-    for r in rows:
-        rid = r[0]
-
-        # filtro tipologia
-        if preferred_types and not match_type_filter(type_map.get(rid, ""), preferred_types):
-            continue
-
-        dist = haversine_km(lat, lon, r[6], r[7])
-        if dist is None:
-            continue
-
-        # filtro raggio
-        if max_distance_km is not None and dist > max_distance_km:
-            continue
-
-        enriched.append((dist, r))
-
-    enriched.sort(key=lambda x: x[0])
-
-    if min_rating is not None:
-        enriched = [e for e in enriched if (e[1][5] is None or e[1][5] >= min_rating)]
-
-    if max_results is not None:
-        enriched = enriched[:max_results]
-
-    return [e[1] for e in enriched]
-
-
-def query_recent_in_cities(cities: List[str], limit: int = 50):
-    if not cities:
-        return []
-
-    with closing(get_conn()) as conn:
-        cur = conn.cursor()
-        placeholders = ",".join("?" * len(cities))
-        sql = f"""
-        SELECT id, name, city, address, notes, rating, lat, lon, last_update
-        FROM restaurants
-        WHERE city IN ({placeholders})
-        ORDER BY last_update DESC
-        LIMIT ?
-        """
-        cur.execute(sql, (*cities, limit))
-        return cur.fetchall()
-
-
-def build_city_page(user_id: int, city: str, page: int):
-    rows = query_by_city(city, user_id)
-    if not rows:
-        return None, None
-
-    total = len(rows)
-    total_pages = (total + PAGE_SIZE - 1) // PAGE_SIZE
-    page = max(0, min(page, total_pages - 1))
-
-    start = page * PAGE_SIZE
-    end = start + PAGE_SIZE
-    page_rows = rows[start:end]
-
-    lines = [
-        f"Ho trovato <b>{total}</b> ristoranti per <b>{city}</b> (pagina {page+1}/{total_pages}):",
-        "",
-    ]
-
-    for idx, r in enumerate(page_rows, start=start + 1):
-        rid, name, city_r, address, notes, rating, lat_r, lon_r, last_update = r
-        rating_str = f"{rating:.1f}⭐" if rating is not None else "n.d."
-        lines.append(f"{idx}. {name} – {rating_str}")
-
-    lines.append("")
-    lines.append("👇 Tocca un pulsante per i dettagli di un ristorante.")
-
-    text = "\n".join(lines)
-
-    keyboard_rows = []
-    for idx, r in enumerate(page_rows, start=start + 1):
-        rid = r[0]
-        keyboard_rows.append(
-            [InlineKeyboardButton(f"Dettagli {idx}", callback_data=f"details:{rid}")]
-        )
-
-    nav_row = []
-    enc_city = encode_city(city)
-    if total_pages > 1:
-        if page > 0:
-            nav_row.append(
-                InlineKeyboardButton(
-                    "⬅️ Indietro", callback_data=f"page:{enc_city}:{page-1}"
-                )
-            )
-        if page < total_pages - 1:
-            nav_row.append(
-                InlineKeyboardButton(
-                    "➡️ Avanti", callback_data=f"page:{enc_city}:{page+1}"
-                )
-            )
-    if nav_row:
-        keyboard_rows.append(nav_row)
-
-    keyboard_rows.append(
-        [InlineKeyboardButton(f"🔔 Segui {city}", callback_data=f"subcity:{city}")]
-    )
-
-    kb = InlineKeyboardMarkup(keyboard_rows)
-    return text, kb
-
-
-def build_nearby_page(user_id: int, lat: float, lon: float, page: int, radius_km: Optional[float] = None):
-    rows = query_nearby(lat, lon, user_id, max_results=None, max_distance_km=radius_km)
-    if not rows:
-        return None, None
-
-    total = len(rows)
-    total_pages = (total + PAGE_SIZE - 1) // PAGE_SIZE
-    page = max(0, min(page, total_pages - 1))
-
-    start = page * PAGE_SIZE
-    end = start + PAGE_SIZE
-    page_rows = rows[start:end]
-
-    radius_info = ""
-    if radius_km is not None:
-        radius_info = f" entro <b>{radius_km:.0f} km</b>"
-
-    lines = [
-        f"Ho trovato <b>{total}</b> ristoranti vicino a te{radius_info} (pagina {page+1}/{total_pages}):",
-        "",
-    ]
-
-    for idx, r in enumerate(page_rows, start=start + 1):
-        rid, name, city_r, address, notes, rating, lat_r, lon_r, last_update = r
-        rating_str = f"{rating:.1f}⭐" if rating is not None else "n.d."
-        dist = haversine_km(lat, lon, lat_r, lon_r)
-        if dist is not None:
-            dist_str = f"{dist*1000:.0f} m" if dist < 1 else f"{dist:.1f} km"
-        else:
-            dist_str = "n.d."
-        lines.append(f"{idx}. {name} – {rating_str} – {dist_str}")
-
-    lines.append("")
-    lines.append("👇 Tocca un pulsante per i dettagli di un ristorante.")
-
-    text = "\n".join(lines)
-
-    keyboard_rows = []
-    for idx, r in enumerate(page_rows, start=start + 1):
-        rid = r[0]
-        keyboard_rows.append(
-            [InlineKeyboardButton(f"Dettagli {idx}", callback_data=f"details:{rid}")]
-        )
-
-    nav_row = []
-    lat_str = f"{lat:.5f}"
-    lon_str = f"{lon:.5f}"
-    if total_pages > 1:
-        if page > 0:
-            cb = f"nearpage:{lat_str}:{lon_str}:{page-1}"
-            if radius_km is not None:
-                cb = f"{cb}:{radius_km:.1f}"
-            nav_row.append(
-                InlineKeyboardButton("⬅️ Indietro", callback_data=cb)
-            )
-        if page < total_pages - 1:
-            cb = f"nearpage:{lat_str}:{lon_str}:{page+1}"
-            if radius_km is not None:
-                cb = f"{cb}:{radius_km:.1f}"
-            nav_row.append(
-                InlineKeyboardButton("➡️ Avanti", callback_data=cb)
-            )
-    if nav_row:
-        keyboard_rows.append(nav_row)
-
-    kb = InlineKeyboardMarkup(keyboard_rows)
-    return text, kb
-
-
-def format_restaurant_row(row, user_location=None):
-    rid, name, city, address, notes, rating, lat, lon, last_update = row
-
-    risk = eval_risk(notes or "")
-
-    distance_str = ""
-    if user_location and lat is not None and lon is not None:
-        dist = haversine_km(user_location[0], user_location[1], lat, lon)
-        if dist is not None:
-            if dist < 1:
-                distance_str = f"\n📏 Distanza: {dist*1000:.0f} m"
-            else:
-                distance_str = f"\n📏 Distanza: {dist:.1f} km"
-
-    rating_str = f"{rating:.1f}⭐" if rating is not None else "n.d."
-    update_str = f" (aggiornato: {last_update})" if last_update else ""
-
-    maps_url = f"https://www.google.com/maps/search/?api=1&query={name.replace(' ', '+')}+{city.replace(' ', '+')}"
-
-    text = (
-        f"🍽 <b>{name}</b>\n"
-        f"📍 <b>{city}</b> – {address or 'Indirizzo non disponibile'}\n"
-        f"⭐ Rating medio Google: {rating_str}{update_str}\n"
-        f"{distance_str}\n"
-        f"\n<b>Note:</b> {notes or '—'}\n"
-        f"\n<b>Rischio contaminazione:</b> {risk}\n"
-        f"\n🌍 <a href=\"{maps_url}\">Apri in Google Maps</a>"
-    )
-
-    return text, rid
-
-
-# ==========================
-# HANDLER BOT
-# ==========================
-
-def main_keyboard():
-    return ReplyKeyboardMarkup(
-        [
-            ["🔍 Cerca per città", "📍 Vicino a me"],
-            ["➕ Aggiungi ristorante", "⭐ I miei preferiti"],
-            ["🛒 Shop", "🔔 Novità città seguite"],
-            ["💡 Suggerisci città da analizzare", "⚙️ Filtri"],
-        ],
-        resize_keyboard=True,
-    )
-
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    log_usage(user.id, "start")
-
-    points, title = get_user_stats(user.id)
-    msg = (
-        f"Ciao {user.first_name or ''}!\n\n"
-        f"Benvenuto in <b>GlutenFreeBot</b> 🧡\n\n"
-        f"Ti aiuto a trovare ristoranti con recensioni che citano "
-        f"glutine / senza glutine / gluten free.\n\n"
-        f"Il tuo profilo:\n"
-        f"• Punti: <b>{points}</b>\n"
-        f"• Titolo: <b>{title}</b>\n\n"
-        f"Usa i pulsanti qui sotto per iniziare."
-    )
-    await update.message.reply_text(msg, reply_markup=main_keyboard(), parse_mode="HTML")
-
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    log_usage(user.id, "help")
-
-    text = (
-        "Comandi principali:\n"
-        "• /start – mostra il menu\n"
-        "• Cerca per città – cerca ristoranti gluten-friendly in una città\n"
-        "• Vicino a me – scegli il raggio e invia la posizione\n"
-        "• Aggiungi ristorante – segnala un locale che conosci\n"
-        "• I miei preferiti – ristoranti che hai salvato ⭐\n"
-        "• Filtri – rating minimo + tipologia locale\n"
-        "• Novità città seguite – locali nuovi nelle città che segui\n"
-        "• Shop – prodotti senza glutine consigliati\n"
-        "• /stats – statistiche di utilizzo (solo admin)\n"
-    )
-    await update.message.reply_text(text, reply_markup=main_keyboard())
-
-
-async def show_shop_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    log_usage(user.id, "shop_open")
-
-    lines = [
-        "🛒 <b>GlutenFree Shop</b>",
-        "",
-        "Qui trovi prodotti senza glutine selezionati da Antonio.",
-        "Gli acquisti passano da Amazon e aiutano a sostenere il progetto.",
-        "",
-        "Scegli una categoria:",
-    ]
-
-    keyboard_rows = []
-    for cat in SHOP_CATEGORIES:
-        keyboard_rows.append(
-            [
-                InlineKeyboardButton(
-                    cat["name"], callback_data=f"shopcat:{cat['id']}"
-                )
-            ]
-        )
-
-    kb = InlineKeyboardMarkup(keyboard_rows)
-
-    await update.message.reply_text(
-        "\n".join(lines),
-        parse_mode="HTML",
-        reply_markup=kb,
-        disable_web_page_preview=True,
-    )
-
-
-async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if not ADMIN_CHAT_ID or user.id != ADMIN_CHAT_ID:
-        await update.message.reply_text("Questo comando è riservato all'amministratore.")
-        return
-
-    with closing(get_conn()) as conn:
-        cur = conn.cursor()
-
-        cur.execute("SELECT COUNT(*) FROM usage_events")
-        total_events = cur.fetchone()[0] or 0
-
-        cur.execute("SELECT COUNT(DISTINCT user_id) FROM usage_events")
-        total_users = cur.fetchone()[0] or 0
-
-        cur.execute(
-            """
-            SELECT event_type, COUNT(*) AS c
-            FROM usage_events
-            GROUP BY event_type
-            ORDER BY c DESC
-            LIMIT 10
-            """
-        )
-        top_events = cur.fetchall()
-
-        cur.execute(
-            """
-            SELECT city, COUNT(*) AS c
-            FROM usage_events
-            WHERE event_type = 'search_city'
-              AND city IS NOT NULL
-              AND city <> ''
-            GROUP BY city
-            ORDER BY c DESC
-            LIMIT 10
-            """
-        )
-        top_cities = cur.fetchall()
-
-    lines = [
-        "📊 <b>Statistiche utilizzo bot</b>",
-        "",
-        f"Totale eventi tracciati: <b>{total_events}</b>",
-        f"Utenti unici: <b>{total_users}</b>",
-        "",
-        "<b>Funzioni più usate:</b>",
-    ]
-    if top_events:
-        for etype, cnt in top_events:
-            lines.append(f"• {etype}: <b>{cnt}</b>")
-    else:
-        lines.append("• Nessun dato ancora.")
-
-    lines.append("")
-    lines.append("<b>Città più cercate:</b>")
-    if top_cities:
-        for city, cnt in top_cities:
-            lines.append(f"• {city}: <b>{cnt}</b>")
-    else:
-        lines.append("• Nessuna ricerca città ancora.")
-
-    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
-
-
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    text = (update.message.text or "").strip()
-
-    # Gestione scelta raggio per "vicino a me"
-    if context.user_data.get("awaiting_radius"):
-        if text in ["1 km", "3 km", "5 km", "10 km"]:
-            radius_km = int(text.split()[0])
-            context.user_data["awaiting_radius"] = False
-            context.user_data["nearby_radius_km"] = radius_km
-            log_usage(user.id, "nearby_radius_set")
-
-            await update.message.reply_text(
-                "Perfetto! Ora inviami la tua posizione usando il bottone:",
-                reply_markup=ReplyKeyboardMarkup(
-                    [
-                        [
-                            KeyboardButton(
-                                "Invia posizione 📍", request_location=True
-                            )
-                        ]
-                    ],
-                    resize_keyboard=True,
-                    one_time_keyboard=True,
-                ),
-            )
-            return
-        else:
-            await update.message.reply_text(
-                "Scegli una delle opzioni: 1 km, 3 km, 5 km o 10 km.",
-                reply_markup=ReplyKeyboardMarkup(
-                    [["1 km", "3 km"], ["5 km", "10 km"]],
-                    resize_keyboard=True,
-                    one_time_keyboard=True,
-                ),
-            )
-            return
-
-    # Flusso "Suggerisci città da analizzare"
-    if context.user_data.get("awaiting_suggest_city"):
-        context.user_data["awaiting_suggest_city"] = False
-        city = text.strip()
-        if not city:
-            await update.message.reply_text(
-                "Inserisci un nome città valido per il suggerimento.",
-                reply_markup=main_keyboard(),
-            )
-            return
-
-        add_suggested_city(user.id, city)
-        log_usage(user.id, "suggest_city", city)
-
-        await update.message.reply_text(
-            f"Grazie! Ho registrato il suggerimento per la città <b>{city}</b>.",
-            parse_mode="HTML",
-            reply_markup=main_keyboard(),
-        )
-
-        if ADMIN_CHAT_ID:
-            try:
-                msg = (
-                    "💡 <b>Nuovo suggerimento città</b>\n\n"
-                    f"👤 Utente: {user.full_name} (id: {user.id})\n"
-                    f"🏙 Città: <b>{city}</b>"
-                )
-                await context.bot.send_message(
-                    chat_id=ADMIN_CHAT_ID, text=msg, parse_mode="HTML"
-                )
-            except Exception:
-                pass
-
-        return
-
-    if text == "🔍 Cerca per città":
-        log_usage(user.id, "menu_search_city")
-
-        await update.message.reply_text(
-            "Scrivimi il nome della città (es: 'Bari').",
-            reply_markup=main_keyboard(),
-        )
-        context.user_data["awaiting_city_search"] = True
-        return
-
-    if context.user_data.get("awaiting_city_search"):
-        context.user_data["awaiting_city_search"] = False
-        await search_city(update, context, text)
-        return
-
-    if text == "📍 Vicino a me":
-        log_usage(user.id, "menu_nearby")
-
-        context.user_data["awaiting_radius"] = True
-        await update.message.reply_text(
-            "Scegli il raggio di ricerca:",
-            reply_markup=ReplyKeyboardMarkup(
-                [["1 km", "3 km"], ["5 km", "10 km"]],
-                resize_keyboard=True,
-                one_time_keyboard=True,
-            ),
-        )
-        return
-
-    if text == "➕ Aggiungi ristorante":
-        log_usage(user.id, "menu_add_restaurant")
-        return await add_restaurant_start(update, context)
-
-    if text == "⭐ I miei preferiti":
-        log_usage(user.id, "menu_favorites")
-        return await my_favorites(update, context)
-
-    if text == "⚙️ Filtri":
-        log_usage(user.id, "menu_filters")
-        return await show_filters(update, context)
-
-    if text == "🔔 Novità città seguite":
-        log_usage(user.id, "menu_news")
-        return await show_news(update, context)
-
-    if text == "🛒 Shop":
-        return await show_shop_menu(update, context)
-
-    if text == "💡 Suggerisci città da analizzare":
-        log_usage(user.id, "menu_suggest_city")
-        context.user_data["awaiting_suggest_city"] = True
-        await update.message.reply_text(
-            "Scrivimi il nome della città che vorresti fosse analizzata (es: 'Perugia').",
-            reply_markup=main_keyboard(),
-        )
-        return
-
-    if text == "Invia posizione 📍":
-        await update.message.reply_text(
-            "Usa il bottone posizione di Telegram per mandarmi la geolocalizzazione."
-        )
-        return
-
-    log_usage(user.id, "unknown_text")
-
-    await update.message.reply_text(
-        "Non ho capito il comando. Usa /start o i pulsanti sotto.",
-        reply_markup=main_keyboard(),
-    )
-
-
-async def search_city(
-    update: Update, context: ContextTypes.DEFAULT_TYPE, city_text: str
-):
-    user = update.effective_user
-    city = city_text.strip()
-    if not city:
-        await update.message.reply_text("Inserisci un nome città valido.")
-        return
-
-    log_usage(user.id, "search_city", city)
-
-    text, kb = build_city_page(user.id, city, page=0)
-    if text is None:
-        await update.message.reply_text(
-            f"Al momento non ho ristoranti gluten-friendly per <b>{city}</b>.",
-            parse_mode="HTML",
-        )
-        return
-
-    await update.message.reply_text(
-        text,
-        parse_mode="HTML",
-        reply_markup=kb,
-        disable_web_page_preview=True,
-    )
-
-
-async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    loc = update.message.location
-    lat, lon = loc.latitude, loc.longitude
-
-    radius_km = context.user_data.get("nearby_radius_km", 5)
-    log_usage(user.id, "nearby_location", city=None)
-
-    text, kb = build_nearby_page(user.id, lat, lon, page=0, radius_km=radius_km)
-    if text is None:
-        await update.message.reply_text(
-            "Al momento non ho ristoranti con coordinate vicino a te.",
-            reply_markup=main_keyboard(),
-        )
-        return
-
-    await update.message.reply_text(
-        text,
-        parse_mode="HTML",
-        reply_markup=kb,
-        disable_web_page_preview=True,
-    )
-
-    await update.message.reply_text(
-        "Puoi usare di nuovo il menu qui sotto 👇",
-        reply_markup=main_keyboard(),
-    )
-
-
 async def my_favorites(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     favs = get_favorites(user.id)
+
     if not favs:
-        await update.message.reply_text(
-            "Non hai ancora nessun ristorante nei preferiti ⭐.\n"
-            "Quando vedi un locale interessante, usa il bottone '⭐ Preferito'.",
-            reply_markup=main_keyboard(),
-        )
+        await update.message.reply_text("Nessun preferito ancora ⭐")
         return
 
     await update.message.reply_text(
-        f"Hai <b>{len(favs)}</b> ristoranti nei preferiti:",
-        parse_mode="HTML",
-        reply_markup=main_keyboard(),
+        f"Hai <b>{len(favs)}</b> locali nei preferiti:",
+        parse_mode="HTML"
     )
 
     for r in favs[:15]:
-        rid, name, city, address, notes, rating, lat, lon = r
-        row_full = (rid, name, city, address, notes, rating, lat, lon, None)
-        text, _ = format_restaurant_row(row_full)
+        text, rid = format_restaurant_row(r)
         kb = InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton("⚠️ Segnala", callback_data=f"rep:{rid}"),
-                    InlineKeyboardButton(
-                        "📷 Aggiungi foto", callback_data=f"photo:{rid}"
-                    ),
-                ]
-            ]
+            [[InlineKeyboardButton("📷 Aggiungi foto", callback_data=f"photo:{rid}")]]
         )
-        await update.message.reply_text(
-            text,
-            parse_mode="HTML",
-            reply_markup=kb,
-            disable_web_page_preview=True,
-        )
-        photos = get_photos_for_restaurant(rid)
-        if photos:
-            await update.message.reply_photo(
-                photos[0],
-                caption="📷 Foto dalla community",
-            )
+        await update.message.reply_text(text, parse_mode="HTML", reply_markup=kb)
 
+
+# ==========================
+# FILTRI (rating minimo)
+# ==========================
 
 async def show_filters(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    settings = get_user_settings(user.id)
-    min_rating = settings.get("min_rating")
-    preferred_types = settings.get("preferred_types")
-
-    current_rating = f"{min_rating:.1f}" if min_rating is not None else "nessuno"
-
-    if preferred_types == "bar":
-        current_type = "Bar / caffè"
-    elif preferred_types == "bakery":
-        current_type = "Panifici / pasticcerie"
-    elif preferred_types == "cafe":
-        current_type = "Caffè"
-    elif preferred_types == "takeaway":
-        current_type = "Solo asporto"
-    else:
-        current_type = "tutti"
+    s = get_user_settings(user.id)["min_rating"]
+    txt = f"⭐ Rating minimo attuale: <b>{s if s else 'Nessuno'}</b>"
 
     kb = InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton("⭐ ≥ 4.0", callback_data="filt:4.0"),
-                InlineKeyboardButton("⭐ ≥ 4.5", callback_data="filt:4.5"),
+                InlineKeyboardButton("≥ 4.0", callback_data="filt:4.0"),
+                InlineKeyboardButton("≥ 4.5", callback_data="filt:4.5"),
             ],
-            [
-                InlineKeyboardButton(
-                    "❌ Nessun filtro rating", callback_data="filt:none"
-                )
-            ],
-            [
-                InlineKeyboardButton("☕ Bar / caffè", callback_data="ftype:bar"),
-                InlineKeyboardButton("🥐 Panifici", callback_data="ftype:bakery"),
-            ],
-            [
-                InlineKeyboardButton("🥡 Solo asporto", callback_data="ftype:takeaway"),
-                InlineKeyboardButton("🔄 Tutti i tipi", callback_data="ftype:all"),
-            ],
+            [InlineKeyboardButton("❌ Nessun filtro", callback_data="filt:none")]
         ]
     )
 
-    await update.message.reply_text(
-        f"Filtri attuali:\n"
-        f"• Rating minimo: <b>{current_rating}</b>\n"
-        f"• Tipologia locale: <b>{current_type}</b>\n\n"
-        f"Scegli cosa vuoi modificare:",
-        parse_mode="HTML",
-        reply_markup=kb,
-    )
+    await update.message.reply_text(txt, parse_mode="HTML", reply_markup=kb)
 
 
-async def show_news(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    subs = get_subscriptions(user.id)
-    if not subs:
-        await update.message.reply_text(
-            "Non segui ancora nessuna città.\n"
-            "Quando fai una ricerca per città, usa il tasto '🔔 Segui'.",
-            reply_markup=main_keyboard(),
-        )
-        return
-
-    rows = query_recent_in_cities(subs)
-    if not rows:
-        await update.message.reply_text(
-            "Non ho novità recenti nelle città che segui.",
-            reply_markup=main_keyboard(),
-        )
-        return
-
-    await update.message.reply_text(
-        "Ecco alcuni locali aggiornati di recente nelle città che segui:",
-        reply_markup=main_keyboard(),
-    )
-
-    for r in rows[:10]:
-        text, rid = format_restaurant_row(r)
-        kb = InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton(
-                        "⭐ Preferito", callback_data=f"fav:{rid}"
-                    ),
-                    InlineKeyboardButton(
-                        "⚠️ Segnala", callback_data=f"rep:{rid}"
-                    ),
-                ],
-                [
-                    InlineKeyboardButton(
-                        "📷 Aggiungi foto", callback_data=f"photo:{rid}"
-                    )
-                ],
-            ]
-        )
-        await update.message.reply_text(
-            text,
-            parse_mode="HTML",
-            reply_markup=kb,
-            disable_web_page_preview=True,
-        )
-
-
-# ---- AGGIUNGI RISTORANTE (SEGNALAZIONE UTENTE) ----
-
-async def add_restaurant_start(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> int:
-    user = update.effective_user
-    log_usage(user.id, "add_restaurant_start")
-
-    await update.message.reply_text(
-        "Ok, segnaliamo un nuovo ristorante suggerito da te.\n"
-        "Come si chiama il locale?",
-        reply_markup=main_keyboard(),
-    )
-    return ADD_NAME
-
-
-async def add_restaurant_name(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> int:
-    context.user_data["new_rest_name"] = update.message.text.strip()
-    await update.message.reply_text("In che città si trova?")
-    return ADD_CITY
-
-
-async def add_restaurant_city(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> int:
-    context.user_data["new_rest_city"] = update.message.text.strip()
-    await update.message.reply_text("Qual è l'indirizzo?")
-    return ADD_ADDRESS
-
-
-async def add_restaurant_address(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> int:
-    context.user_data["new_rest_address"] = update.message.text.strip()
-    await update.message.reply_text(
-        "Vuoi aggiungere una nota (es. esperienza senza glutine)? Se no, scrivi '-'"
-    )
-    return ADD_NOTES
-
-
-async def add_restaurant_notes(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> int:
-    user = update.effective_user
-    notes = update.message.text.strip()
-    if notes == "-":
-        notes = ""
-
-    name = context.user_data.get("new_rest_name")
-    city = context.user_data.get("new_rest_city")
-    address = context.user_data.get("new_rest_address")
-
-    add_suggested_restaurant(user.id, name, city, address, notes)
-    add_points(user.id, 2)
-    log_usage(user.id, "add_restaurant_done", city)
-
-    if ADMIN_CHAT_ID:
-        try:
-            text = (
-                "📩 <b>Nuova segnalazione ristorante</b>\n\n"
-                f"👤 Utente: {user.full_name} (id: {user.id})\n"
-                f"🏷 Nome: <b>{name}</b>\n"
-                f"📍 Città: {city}\n"
-                f"🗺 Indirizzo: {address or '-'}\n"
-                f"📝 Note: {notes or '—'}"
-            )
-            await context.bot.send_message(
-                chat_id=ADMIN_CHAT_ID, text=text, parse_mode="HTML"
-            )
-        except Exception:
-            pass
-
-    await update.message.reply_text(
-        "Grazie! La tua segnalazione è stata registrata e verrà verificata. 🙌",
-        reply_markup=main_keyboard(),
-    )
-
-    return ConversationHandler.END
-
-
-async def add_restaurant_cancel(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> int:
-    user = update.effective_user
-    log_usage(user.id, "add_restaurant_cancel")
-
-    await update.message.reply_text(
-        "Segnalazione ristorante annullata.", reply_markup=main_keyboard()
-    )
-    return ConversationHandler.END
-
-
-# ---- CALLBACK INLINE BUTTONS ----
+# ==========================
+# CALLBACK HANDLER (part 1) — categorie & pagine
+# ==========================
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
     data = query.data
     user = query.from_user
 
-    # Preferito
-    if data.startswith("fav:"):
-        rid = int(data.split(":")[1])
-        add_favorite(user.id, rid)
-        add_points(user.id, 1)
-        log_usage(user.id, "favorite_add")
+    # --- FILTRO CATEGORIA ---
+    if data.startswith("cat:"):
+        _, city, category = data.split(":", 2)
+        if category == "ALL":
+            category = None
 
-        await query.edit_message_reply_markup(reply_markup=None)
-        await query.message.reply_text("⭐ Aggiunto ai preferiti.")
-        return
-
-    # Segnala (report)
-    if data.startswith("rep:"):
-        rid = int(data.split(":")[1])
-        add_report(user.id, rid, "Segnalazione generica dal bot")
-        add_points(user.id, 1)
-        log_usage(user.id, "report_add")
-
-        await query.message.reply_text(
-            "⚠️ Segnalazione registrata. Grazie, ci aiuta a migliorare i dati."
-        )
-        return
-
-    # Foto
-    if data.startswith("photo:"):
-        rid = int(data.split(":")[1])
-        pending_photo_for_user[user.id] = rid
-        log_usage(user.id, "photo_request")
-
-        await query.message.reply_text(
-            "📷 Inviami una foto del piatto/menù per questo locale.\n"
-            "Quando avrò la foto, la collegherò al ristorante."
-        )
-        return
-
-    # Filtri rating
-    if data.startswith("filt:"):
-        val = data.split(":")[1]
-        if val == "none":
-            set_user_min_rating(user.id, None)
-            await query.message.reply_text("Filtri rating disattivati.")
-            log_usage(user.id, "filters_clear")
-        else:
-            min_r = float(val)
-            set_user_min_rating(user.id, min_r)
+        text, kb = build_city_page(user.id, city, 0, category)
+        if text is None:
             await query.message.reply_text(
-                f"Impostato rating minimo a {min_r:.1f}⭐."
+                f"Nessun locale per categoria <b>{category}</b> a <b>{city}</b>.",
+                parse_mode="HTML"
             )
-            log_usage(user.id, "filters_set")
-        return
-
-    # Filtri tipologia
-    if data.startswith("ftype:"):
-        code = data.split(":", 1)[1]
-        if code == "all":
-            set_user_type_filter(user.id, None)
-            await query.message.reply_text("Filtro tipologia disattivato (tutti i locali).")
-            log_usage(user.id, "filter_type_clear")
         else:
-            set_user_type_filter(user.id, code)
-            if code == "bar":
-                label = "Bar / caffè"
-            elif code == "bakery":
-                label = "Panifici / pasticcerie"
-            elif code == "takeaway":
-                label = "Solo asporto"
-            else:
-                label = code
-            await query.message.reply_text(
-                f"Filtro tipologia impostato su: <b>{label}</b>.",
-                parse_mode="HTML",
-            )
-            log_usage(user.id, "filter_type_set")
+            await query.message.reply_text(text, parse_mode="HTML", reply_markup=kb)
+        await query.answer()
         return
 
-    # Segui città
-    if data.startswith("subcity:"):
-        city = data.split(":", 1)[1]
-        subscribe_city(user.id, city)
-        log_usage(user.id, "subscribe_city", city)
-
-        await query.message.reply_text(
-            f"🔔 Ora segui la città di <b>{city}</b>.\n"
-            f"Usa 'Novità città seguite' per vedere i locali aggiornati.",
-            parse_mode="HTML",
-        )
-        return
-
-    # SHOP: selezione categoria
-    if data.startswith("shopcat:"):
-        cat_id = data.split(":", 1)[1]
-        category = next((c for c in SHOP_CATEGORIES if c["id"] == cat_id), None)
-        if not category:
-            await query.message.reply_text("Categoria non trovata.")
-            return
-
-        log_usage(user.id, "shop_category", category["name"])
-
-        lines = [
-            f"{category['name']}",
-            "",
-            category.get("description", ""),
-            "",
-            "Tocca uno dei prodotti qui sotto per aprirlo su Amazon:",
-        ]
-
-        keyboard_rows = []
-        for item in category["items"]:
-            label = item["name"]
-            if item.get("badge"):
-                label = f"{item['name']} – {item['badge']}"
-            keyboard_rows.append(
-                [
-                    InlineKeyboardButton(
-                        label,
-                        url=item["url"],
-                    )
-                ]
-            )
-
-        kb = InlineKeyboardMarkup(keyboard_rows)
-
-        await query.message.reply_text(
-            "\n".join(lines),
-            parse_mode="HTML",
-            reply_markup=kb,
-            disable_web_page_preview=True,
-        )
-        return
-
-    # Paginazione per città
+    # --- PAGINAZIONE ---
     if data.startswith("page:"):
-        parts = data.split(":")
-        # Formato attuale: page:{enc_city}:{page}
-        if len(parts) == 3:
-            _, enc_city, page_str = parts
-        else:
-            _, enc_city, page_str = parts[:3]
-        city = decode_city(enc_city)
-        page = int(page_str)
+        _, city, page, category = data.split(":", 3)
+        if category == "ALL":
+            category = None
 
-        log_usage(user.id, "city_page", city)
+        page = int(page)
+        text, kb = build_city_page(user.id, city, page, category)
 
-        text, kb = build_city_page(user.id, city, page)
         if text:
-            await query.message.edit_text(
-                text,
-                parse_mode="HTML",
-                reply_markup=kb,
-                disable_web_page_preview=True,
-            )
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=kb)
+        else:
+            await query.message.reply_text("Nessun risultato disponibile.")
+        await query.answer()
         return
 
-    # Paginazione "vicino a me"
-    if data.startswith("nearpage:"):
-        parts = data.split(":")
-        # nearpage:lat:lon:page[:radius]
-        if len(parts) == 4:
-            _, lat_str, lon_str, page_str = parts
-            radius_km = None
-        else:
-            _, lat_str, lon_str, page_str, radius_str = parts
-            try:
-                radius_km = float(radius_str)
-            except ValueError:
-                radius_km = None
+# ==========================
+# CALLBACK HANDLER (part 2)
+# ==========================
 
-        lat = float(lat_str)
-        lon = float(lon_str)
-        page = int(page_str)
+async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    data = query.data
+    user = query.from_user
 
-        log_usage(user.id, "nearby_page")
+    # ----------------------------
+    # (LE PRIME DUE SEZIONI SONO IN BLOCCO 3)
+    # cat:...
+    # page:...
+    # ----------------------------
 
-        text, kb = build_nearby_page(user.id, lat, lon, page, radius_km=radius_km)
-        if text:
-            await query.message.edit_text(
-                text,
-                parse_mode="HTML",
-                reply_markup=kb,
-                disable_web_page_preview=True,
-            )
-        return
-
-    # Dettagli ristorante
+    # --- DETTAGLI ---
     if data.startswith("details:"):
         rid = int(data.split(":")[1])
 
@@ -1660,77 +642,152 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             cur = conn.cursor()
             cur.execute(
                 """
-                SELECT id, name, city, address, notes, rating, lat, lon, last_update
+                SELECT id, name, city, address, notes, rating, lat, lon, last_update, types
                 FROM restaurants
                 WHERE id = ?
                 """,
                 (rid,),
             )
-            row = cur.fetchone()
+            r = cur.fetchone()
 
-        if not row:
-            await query.message.reply_text(
-                "Ristorante non trovato (forse è stato rimosso)."
-            )
+        if not r:
+            await query.message.reply_text("Ristorante non trovato.")
             return
 
-        log_usage(user.id, "details_open")
-
-        text, rid = format_restaurant_row(row)
+        text, rid = format_restaurant_row(r)
         kb = InlineKeyboardMarkup(
             [
-                [
-                    InlineKeyboardButton(
-                        "⭐ Preferito", callback_data=f"fav:{rid}"
-                    ),
-                    InlineKeyboardButton(
-                        "⚠️ Segnala", callback_data=f"rep:{rid}"
-                    ),
-                ],
-                [
-                    InlineKeyboardButton(
-                        "📷 Aggiungi foto", callback_data=f"photo:{rid}"
-                    )
-                ],
+                [InlineKeyboardButton("⭐ Preferito", callback_data=f"fav:{rid}")],
+                [InlineKeyboardButton("📷 Aggiungi foto", callback_data=f"photo:{rid}")]
             ]
         )
-        await query.message.reply_text(
-            text,
-            parse_mode="HTML",
-            reply_markup=kb,
-            disable_web_page_preview=True,
-        )
 
-        photos = get_photos_for_restaurant(rid)
-        if photos:
-            await query.message.reply_photo(
-                photos[0],
-                caption="📷 Foto dalla community",
+        await query.message.reply_text(text, parse_mode="HTML", reply_markup=kb)
+        await query.answer()
+        return
+
+    # --- FAVORITO ---
+    if data.startswith("fav:"):
+        rid = int(data.split(":")[1])
+        with closing(get_conn()) as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "INSERT OR IGNORE INTO favorites (user_id, restaurant_id, created_at) VALUES (?, ?, ?)",
+                (user.id, rid, datetime.utcnow().isoformat()),
             )
+            conn.commit()
+
+        await query.answer("Aggiunto ai preferiti ⭐")
+        return
+
+    # --- FOTO ---
+    if data.startswith("photo:"):
+        rid = int(data.split(":")[1])
+        pending_photo_for_user[user.id] = rid
+
+        await query.message.reply_text("Inviami una foto del locale/piatto 📷")
+        await query.answer()
+        return
+
+    # --- FILTRO RATING ---
+    if data.startswith("filt:"):
+        _, val = data.split(":", 1)
+        if val == "none":
+            set_user_min_rating(user.id, None)
+            await query.message.reply_text("Filtro eliminato.")
+        else:
+            set_user_min_rating(user.id, float(val))
+            await query.message.reply_text(f"Rating minimo impostato a {val}⭐")
+        await query.answer()
+        return
+
+    # --- SHOP PAGINE ---
+    if data.startswith("shop:"):
+        page = int(data.split(":")[1])
+        await send_shop_page(update, page)
+        await query.answer()
         return
 
 
-# ---- PHOTO HANDLER ----
+# ==========================
+# FOTO UPLOAD
+# ==========================
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if user.id not in pending_photo_for_user:
         await update.message.reply_text(
-            "Per collegare una foto ad un locale, prima usa il bottone '📷 Aggiungi foto'."
+            "Prima seleziona un ristorante → poi premi '📷 Aggiungi foto'."
         )
         return
 
     rid = pending_photo_for_user.pop(user.id)
-    photo = update.message.photo[-1]
-    file_id = photo.file_id
-    add_photo_record(user.id, rid, file_id)
-    add_points(user.id, 2)
-    log_usage(user.id, "photo_saved")
+    file_id = update.message.photo[-1].file_id
 
-    await update.message.reply_text(
-        "📷 Foto salvata e collegata al ristorante. Grazie!",
-        reply_markup=main_keyboard(),
-    )
+    with closing(get_conn()) as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO photos (restaurant_id, file_id, user_id, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (rid, file_id, user.id, datetime.utcnow().isoformat()),
+        )
+        conn.commit()
+
+    await update.message.reply_text("Foto aggiunta 📷 Grazie!")
+    log_usage(user.id, f"add_photo:{rid}")
+
+
+# ==========================
+# SHOP AMAZON
+# ==========================
+
+SHOP_PRODUCTS = [
+    {
+        "name": "Mulino Bianco Senza Glutine — Biscotti",
+        "url": "https://amzn.to/4iuLj4T"
+    },
+    {
+        "name": "Biscotti senza glutine – prodotto 2",
+        "url": "https://www.amazon.it/Mulino-Bianco-Biscotti-Frollini-Cioccolato/dp/B07FKN8YRS?tag=glutenfreeita-21"
+    },
+]
+
+
+async def show_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await send_shop_page(update, page=0)
+
+
+async def send_shop_page(update_or_query, page: int):
+    per_page = 5
+    total = len(SHOP_PRODUCTS)
+    total_pages = (total + per_page - 1) // per_page
+    page = max(0, min(page, total_pages - 1))
+
+    start = page * per_page
+    end = start + per_page
+    sub = SHOP_PRODUCTS[start:end]
+
+    msg = "<b>🛒 Prodotti consigliati senza glutine</b>\n\n"
+    for i, p in enumerate(sub, start=1):
+        msg += f"{i}. <a href=\"{p['url']}\">{p['name']}</a>\n"
+
+    kb = []
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅️", callback_data=f"shop:{page-1}"))
+    if page < total_pages - 1:
+        nav.append(InlineKeyboardButton("➡️", callback_data=f"shop:{page+1}"))
+    if nav:
+        kb.append(nav)
+
+    reply_markup = InlineKeyboardMarkup(kb) if kb else None
+
+    if isinstance(update_or_query, Update):
+        await update_or_query.message.reply_text(msg, parse_mode="HTML", reply_markup=reply_markup)
+    else:
+        await update_or_query.edit_message_text(msg, parse_mode="HTML", reply_markup=reply_markup)
 
 
 # ==========================
@@ -1742,59 +799,30 @@ def build_application():
 
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # Comandi base
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("stats", stats_command))
 
-    # Aggiungi ristorante (ConversationHandler)
-    conv_handler = ConversationHandler(
-        entry_points=[
-            MessageHandler(
-                filters.Regex("^➕ Aggiungi ristorante$"), add_restaurant_start
-            )
-        ],
-        states={
-            ADD_NAME: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, add_restaurant_name)
-            ],
-            ADD_CITY: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, add_restaurant_city)
-            ],
-            ADD_ADDRESS: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, add_restaurant_address)
-            ],
-            ADD_NOTES: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, add_restaurant_notes)
-            ],
-        },
-        fallbacks=[CommandHandler("cancel", add_restaurant_cancel)],
-    )
-    app.add_handler(conv_handler)
-
-    # Location
     app.add_handler(MessageHandler(filters.LOCATION, handle_location))
-
-    # Photo
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 
-    # Callback query (inline buttons)
     app.add_handler(CallbackQueryHandler(callback_handler))
 
-    # Testo generico
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     return app
 
 
+# ==========================
+# RUN
+# ==========================
+
 if __name__ == "__main__":
-    print(f"🚀 Avvio GlutenFreeBot – SCHEMA_VERSION = {SCHEMA_VERSION}")
     print("🔄 Importo ristoranti da app_restaurants.csv...")
     try:
         import_app_restaurants()
         print("✅ Import completato.")
     except Exception as e:
-        print("⚠️ Errore durante l'import dei ristoranti:", e)
+        print("⚠️ Errore import ristoranti:", e)
 
     application = build_application()
     print("🤖 GlutenFreeBot avviato...")
