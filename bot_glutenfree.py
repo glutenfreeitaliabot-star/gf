@@ -33,7 +33,7 @@ ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
 
 DB_PATH = "restaurants.db"
 PAGE_SIZE = 5
-SCHEMA_VERSION = "v3-usage-stats-suggest-city-shop"
+SCHEMA_VERSION = "v4-radius-type-filter"
 
 # Stati per ConversationHandler "aggiungi ristorante"
 ADD_NAME, ADD_CITY, ADD_ADDRESS, ADD_NOTES = range(4)
@@ -55,12 +55,12 @@ SHOP_CATEGORIES = [
             {
                 "name": "Mix pane/pizza senza glutine",
                 "badge": "Best seller",
-                "url": "https://www.amazon.it/INSERISCI_TUO_LINK1",
+                "url": "https://www.amazon.it/INSERISCI_TUO_LINK1?tag=glutenfreeita-21",
             },
             {
                 "name": "Farina di riso fine",
                 "badge": "Base dispensa",
-                "url": "https://www.amazon.it/INSERISCI_TUO_LINK2",
+                "url": "https://www.amazon.it/INSERISCI_TUO_LINK2?tag=glutenfreeita-21",
             },
         ],
     },
@@ -72,12 +72,12 @@ SHOP_CATEGORIES = [
             {
                 "name": "Barrette senza glutine",
                 "badge": "Per l'ufficio",
-                "url": "https://www.amazon.it/INSERISCI_TUO_LINK3",
+                "url": "https://www.amazon.it/INSERISCI_TUO_LINK3?tag=glutenfreeita-21",
             },
             {
                 "name": "Biscotti senza glutine",
                 "badge": "Top colazione",
-                "url": "https://www.amazon.it/INSERISCI_TUO_LINK4",
+                "url": "https://www.amazon.it/INSERISCI_TUO_LINK4?tag=glutenfreeita-21",
             },
         ],
     },
@@ -89,7 +89,7 @@ SHOP_CATEGORIES = [
             {
                 "name": "Piadine senza glutine",
                 "badge": "Sempre in frigo",
-                "url": "https://www.amazon.it/INSERISCI_TUO_LINK5",
+                "url": "https://www.amazon.it/INSERISCI_TUO_LINK5?tag=glutenfreeita-21",
             },
         ],
     },
@@ -101,7 +101,7 @@ SHOP_CATEGORIES = [
             {
                 "name": "Box assaggio senza glutine",
                 "badge": "Idea regalo",
-                "url": "https://www.amazon.it/INSERISCI_TUO_LINK6",
+                "url": "https://www.amazon.it/INSERISCI_TUO_LINK6?tag=glutenfreeita-21",
             },
         ],
     },
@@ -171,6 +171,12 @@ def ensure_schema():
             )
             """
         )
+
+        # Aggiungo colonna preferred_types se non esiste
+        cur.execute("PRAGMA table_info(user_settings)")
+        cols = [r[1] for r in cur.fetchall()]
+        if "preferred_types" not in cols:
+            cur.execute("ALTER TABLE user_settings ADD COLUMN preferred_types TEXT")
 
         # Segnalazioni / errori
         cur.execute(
@@ -248,7 +254,7 @@ def ensure_schema():
             """
         )
 
-        # Nuova: eventi di utilizzo per statistiche
+        # Eventi di utilizzo per statistiche
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS usage_events (
@@ -261,7 +267,7 @@ def ensure_schema():
             """
         )
 
-        # Nuova: suggerimenti di città da analizzare
+        # Suggerimenti di città da analizzare
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS suggested_cities (
@@ -323,24 +329,38 @@ def get_user_settings(user_id: int):
     with closing(get_conn()) as conn:
         cur = conn.cursor()
         cur.execute(
-            "SELECT min_rating FROM user_settings WHERE user_id = ?",
+            "SELECT min_rating, preferred_types FROM user_settings WHERE user_id = ?",
             (user_id,),
         )
         row = cur.fetchone()
         if not row:
-            return {"min_rating": None}
-        return {"min_rating": row[0]}
+            return {"min_rating": None, "preferred_types": None}
+        return {"min_rating": row[0], "preferred_types": row[1]}
 
 
 def set_user_min_rating(user_id: int, value: Optional[float]):
     with closing(get_conn()) as conn:
         cur = conn.cursor()
         if value is None:
-            cur.execute("DELETE FROM user_settings WHERE user_id = ?", (user_id,))
+            cur.execute("UPDATE user_settings SET min_rating = NULL WHERE user_id = ?", (user_id,))
         else:
             cur.execute(
                 "INSERT INTO user_settings (user_id, min_rating) VALUES (?, ?) "
                 "ON CONFLICT(user_id) DO UPDATE SET min_rating = ?",
+                (user_id, value, value),
+            )
+        conn.commit()
+
+
+def set_user_type_filter(user_id: int, value: Optional[str]):
+    with closing(get_conn()) as conn:
+        cur = conn.cursor()
+        if value is None:
+            cur.execute("UPDATE user_settings SET preferred_types = NULL WHERE user_id = ?", (user_id,))
+        else:
+            cur.execute(
+                "INSERT INTO user_settings (user_id, preferred_types) VALUES (?, ?) "
+                "ON CONFLICT(user_id) DO UPDATE SET preferred_types = ?",
                 (user_id, value, value),
             )
         conn.commit()
@@ -535,9 +555,33 @@ def decode_city(s: str) -> str:
     return s.replace("_", " ")
 
 
+def match_type_filter(types_str: str, filter_code: Optional[str]) -> bool:
+    """
+    types_str: stringa pipe-separated tipo "bar|cafe|establishment|food|restaurant"
+    filter_code: None / 'bar' / 'bakery' / 'cafe' / 'takeaway'
+    """
+    if not filter_code or filter_code == "all":
+        return True
+
+    tokens = (types_str or "").lower().split("|")
+
+    if filter_code == "bar":
+        return "bar" in tokens or "night_club" in tokens
+    if filter_code == "bakery":
+        return "bakery" in tokens
+    if filter_code == "cafe":
+        return "cafe" in tokens
+    if filter_code == "takeaway":
+        return "meal_takeaway" in tokens or "meal_delivery" in tokens
+
+    # fallback: se non riconosciamo il filtro, non escludiamo nulla
+    return True
+
+
 def query_by_city(city: str, user_id: int):
     settings = get_user_settings(user_id)
     min_rating = settings.get("min_rating")
+    preferred_types = settings.get("preferred_types")
 
     with closing(get_conn()) as conn:
         cur = conn.cursor()
@@ -550,15 +594,46 @@ def query_by_city(city: str, user_id: int):
         cur.execute(sql, (city,))
         rows = cur.fetchall()
 
+        # Mappa id -> types per filtro tipologia
+        if preferred_types:
+            cur.execute(
+                """
+                SELECT id, types
+                FROM restaurants
+                WHERE LOWER(city) = LOWER(?)
+                """,
+                (city,),
+            )
+            trows = cur.fetchall()
+            type_map = {rid: (t or "") for rid, t in trows}
+        else:
+            type_map = {}
+
+    # Filtro rating
     if min_rating is not None:
         rows = [r for r in rows if (r[5] is None or r[5] >= min_rating)]
+
+    # Filtro tipologia
+    if preferred_types:
+        rows = [
+            r
+            for r in rows
+            if match_type_filter(type_map.get(r[0], ""), preferred_types)
+        ]
 
     return rows
 
 
-def query_nearby(lat: float, lon: float, user_id: int, max_results: int = 50):
+def query_nearby(
+    lat: float,
+    lon: float,
+    user_id: int,
+    max_results: int = 50,
+    max_distance_km: Optional[float] = None,
+):
     settings = get_user_settings(user_id)
     min_rating = settings.get("min_rating")
+    preferred_types = settings.get("preferred_types")
 
     with closing(get_conn()) as conn:
         cur = conn.cursor()
@@ -571,12 +646,38 @@ def query_nearby(lat: float, lon: float, user_id: int, max_results: int = 50):
         )
         rows = cur.fetchall()
 
+        # Mappa id -> types
+        if preferred_types:
+            cur.execute(
+                """
+                SELECT id, types
+                FROM restaurants
+                WHERE lat IS NOT NULL AND lon IS NOT NULL
+                """
+            )
+            trows = cur.fetchall()
+            type_map = {rid: (t or "") for rid, t in trows}
+        else:
+            type_map = {}
+
     enriched = []
     for r in rows:
+        rid = r[0]
+
+        # filtro tipologia
+        if preferred_types and not match_type_filter(type_map.get(rid, ""), preferred_types):
+            continue
+
         dist = haversine_km(lat, lon, r[6], r[7])
+        if dist is None:
+            continue
+
+        # filtro raggio
+        if max_distance_km is not None and dist > max_distance_km:
+            continue
+
         enriched.append((dist, r))
 
-    enriched = [e for e in enriched if e[0] is not None]
     enriched.sort(key=lambda x: x[0])
 
     if min_rating is not None:
@@ -667,8 +768,8 @@ def build_city_page(user_id: int, city: str, page: int):
     return text, kb
 
 
-def build_nearby_page(user_id: int, lat: float, lon: float, page: int):
-    rows = query_nearby(lat, lon, user_id, max_results=None)
+def build_nearby_page(user_id: int, lat: float, lon: float, page: int, radius_km: Optional[float] = None):
+    rows = query_nearby(lat, lon, user_id, max_results=None, max_distance_km=radius_km)
     if not rows:
         return None, None
 
@@ -680,8 +781,12 @@ def build_nearby_page(user_id: int, lat: float, lon: float, page: int):
     end = start + PAGE_SIZE
     page_rows = rows[start:end]
 
+    radius_info = ""
+    if radius_km is not None:
+        radius_info = f" entro <b>{radius_km:.0f} km</b>"
+
     lines = [
-        f"Ho trovato <b>{total}</b> ristoranti vicino a te (pagina {page+1}/{total_pages}):",
+        f"Ho trovato <b>{total}</b> ristoranti vicino a te{radius_info} (pagina {page+1}/{total_pages}):",
         "",
     ]
 
@@ -712,18 +817,18 @@ def build_nearby_page(user_id: int, lat: float, lon: float, page: int):
     lon_str = f"{lon:.5f}"
     if total_pages > 1:
         if page > 0:
+            cb = f"nearpage:{lat_str}:{lon_str}:{page-1}"
+            if radius_km is not None:
+                cb = f"{cb}:{radius_km:.1f}"
             nav_row.append(
-                InlineKeyboardButton(
-                    "⬅️ Indietro",
-                    callback_data=f"nearpage:{lat_str}:{lon_str}:{page-1}",
-                )
+                InlineKeyboardButton("⬅️ Indietro", callback_data=cb)
             )
         if page < total_pages - 1:
+            cb = f"nearpage:{lat_str}:{lon_str}:{page+1}"
+            if radius_km is not None:
+                cb = f"{cb}:{radius_km:.1f}"
             nav_row.append(
-                InlineKeyboardButton(
-                    "➡️ Avanti",
-                    callback_data=f"nearpage:{lat_str}:{lon_str}:{page+1}",
-                )
+                InlineKeyboardButton("➡️ Avanti", callback_data=cb)
             )
     if nav_row:
         keyboard_rows.append(nav_row)
@@ -806,10 +911,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Comandi principali:\n"
         "• /start – mostra il menu\n"
         "• Cerca per città – cerca ristoranti gluten-friendly in una città\n"
-        "• Vicino a me – invia la posizione per vedere i locali vicini\n"
+        "• Vicino a me – scegli il raggio e invia la posizione\n"
         "• Aggiungi ristorante – segnala un locale che conosci\n"
         "• I miei preferiti – ristoranti che hai salvato ⭐\n"
-        "• Filtri – imposta rating minimo\n"
+        "• Filtri – rating minimo + tipologia locale\n"
         "• Novità città seguite – locali nuovi nelle città che segui\n"
         "• Shop – prodotti senza glutine consigliati\n"
         "• /stats – statistiche di utilizzo (solo admin)\n"
@@ -919,6 +1024,40 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     text = (update.message.text or "").strip()
 
+    # Gestione scelta raggio per "vicino a me"
+    if context.user_data.get("awaiting_radius"):
+        if text in ["1 km", "3 km", "5 km", "10 km"]:
+            radius_km = int(text.split()[0])
+            context.user_data["awaiting_radius"] = False
+            context.user_data["nearby_radius_km"] = radius_km
+            log_usage(user.id, "nearby_radius_set")
+
+            await update.message.reply_text(
+                "Perfetto! Ora inviami la tua posizione usando il bottone:",
+                reply_markup=ReplyKeyboardMarkup(
+                    [
+                        [
+                            KeyboardButton(
+                                "Invia posizione 📍", request_location=True
+                            )
+                        ]
+                    ],
+                    resize_keyboard=True,
+                    one_time_keyboard=True,
+                ),
+            )
+            return
+        else:
+            await update.message.reply_text(
+                "Scegli una delle opzioni: 1 km, 3 km, 5 km o 10 km.",
+                reply_markup=ReplyKeyboardMarkup(
+                    [["1 km", "3 km"], ["5 km", "10 km"]],
+                    resize_keyboard=True,
+                    one_time_keyboard=True,
+                ),
+            )
+            return
+
     # Flusso "Suggerisci città da analizzare"
     if context.user_data.get("awaiting_suggest_city"):
         context.user_data["awaiting_suggest_city"] = False
@@ -939,7 +1078,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=main_keyboard(),
         )
 
-        # Notifica admin
         if ADMIN_CHAT_ID:
             try:
                 msg = (
@@ -973,16 +1111,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == "📍 Vicino a me":
         log_usage(user.id, "menu_nearby")
 
+        context.user_data["awaiting_radius"] = True
         await update.message.reply_text(
-            "Invia la tua posizione usando il tasto apposito.",
+            "Scegli il raggio di ricerca:",
             reply_markup=ReplyKeyboardMarkup(
-                [
-                    [
-                        KeyboardButton(
-                            "Invia posizione 📍", request_location=True
-                        )
-                    ]
-                ],
+                [["1 km", "3 km"], ["5 km", "10 km"]],
                 resize_keyboard=True,
                 one_time_keyboard=True,
             ),
@@ -1063,9 +1196,10 @@ async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
     loc = update.message.location
     lat, lon = loc.latitude, loc.longitude
 
-    log_usage(user.id, "nearby_location")
+    radius_km = context.user_data.get("nearby_radius_km", 5)
+    log_usage(user.id, "nearby_location", city=None)
 
-    text, kb = build_nearby_page(user.id, lat, lon, page=0)
+    text, kb = build_nearby_page(user.id, lat, lon, page=0, radius_km=radius_km)
     if text is None:
         await update.message.reply_text(
             "Al momento non ho ristoranti con coordinate vicino a te.",
@@ -1135,7 +1269,20 @@ async def show_filters(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     settings = get_user_settings(user.id)
     min_rating = settings.get("min_rating")
-    current = f"{min_rating:.1f}" if min_rating is not None else "nessuno"
+    preferred_types = settings.get("preferred_types")
+
+    current_rating = f"{min_rating:.1f}" if min_rating is not None else "nessuno"
+
+    if preferred_types == "bar":
+        current_type = "Bar / caffè"
+    elif preferred_types == "bakery":
+        current_type = "Panifici / pasticcerie"
+    elif preferred_types == "cafe":
+        current_type = "Caffè"
+    elif preferred_types == "takeaway":
+        current_type = "Solo asporto"
+    else:
+        current_type = "tutti"
 
     kb = InlineKeyboardMarkup(
         [
@@ -1148,12 +1295,22 @@ async def show_filters(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "❌ Nessun filtro rating", callback_data="filt:none"
                 )
             ],
+            [
+                InlineKeyboardButton("☕ Bar / caffè", callback_data="ftype:bar"),
+                InlineKeyboardButton("🥐 Panifici", callback_data="ftype:bakery"),
+            ],
+            [
+                InlineKeyboardButton("🥡 Solo asporto", callback_data="ftype:takeaway"),
+                InlineKeyboardButton("🔄 Tutti i tipi", callback_data="ftype:all"),
+            ],
         ]
     )
 
     await update.message.reply_text(
-        f"Filtri attuali:\n• Rating minimo: <b>{current}</b>\n\n"
-        "Scegli un'impostazione:",
+        f"Filtri attuali:\n"
+        f"• Rating minimo: <b>{current_rating}</b>\n"
+        f"• Tipologia locale: <b>{current_type}</b>\n\n"
+        f"Scegli cosa vuoi modificare:",
         parse_mode="HTML",
         reply_markup=kb,
     )
@@ -1268,7 +1425,6 @@ async def add_restaurant_notes(
     add_points(user.id, 2)
     log_usage(user.id, "add_restaurant_done", city)
 
-    # Notifica admin
     if ADMIN_CHAT_ID:
         try:
             text = (
@@ -1364,6 +1520,30 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             log_usage(user.id, "filters_set")
         return
 
+    # Filtri tipologia
+    if data.startswith("ftype:"):
+        code = data.split(":", 1)[1]
+        if code == "all":
+            set_user_type_filter(user.id, None)
+            await query.message.reply_text("Filtro tipologia disattivato (tutti i locali).")
+            log_usage(user.id, "filter_type_clear")
+        else:
+            set_user_type_filter(user.id, code)
+            if code == "bar":
+                label = "Bar / caffè"
+            elif code == "bakery":
+                label = "Panifici / pasticcerie"
+            elif code == "takeaway":
+                label = "Solo asporto"
+            else:
+                label = code
+            await query.message.reply_text(
+                f"Filtro tipologia impostato su: <b>{label}</b>.",
+                parse_mode="HTML",
+            )
+            log_usage(user.id, "filter_type_set")
+        return
+
     # Segui città
     if data.startswith("subcity:"):
         city = data.split(":", 1)[1]
@@ -1421,7 +1601,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Paginazione per città
     if data.startswith("page:"):
-        _, enc_city, page_str = data.split(":")
+        parts = data.split(":")
+        # Formato attuale: page:{enc_city}:{page}
+        if len(parts) == 3:
+            _, enc_city, page_str = parts
+        else:
+            _, enc_city, page_str = parts[:3]
         city = decode_city(enc_city)
         page = int(page_str)
 
@@ -1439,14 +1624,25 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Paginazione "vicino a me"
     if data.startswith("nearpage:"):
-        _, lat_str, lon_str, page_str = data.split(":")
+        parts = data.split(":")
+        # nearpage:lat:lon:page[:radius]
+        if len(parts) == 4:
+            _, lat_str, lon_str, page_str = parts
+            radius_km = None
+        else:
+            _, lat_str, lon_str, page_str, radius_str = parts
+            try:
+                radius_km = float(radius_str)
+            except ValueError:
+                radius_km = None
+
         lat = float(lat_str)
         lon = float(lon_str)
         page = int(page_str)
 
         log_usage(user.id, "nearby_page")
 
-        text, kb = build_nearby_page(user.id, lat, lon, page)
+        text, kb = build_nearby_page(user.id, lat, lon, page, radius_km=radius_km)
         if text:
             await query.message.edit_text(
                 text,
