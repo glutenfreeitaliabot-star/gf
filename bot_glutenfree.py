@@ -73,7 +73,7 @@ def ensure_schema():
                 user_id INTEGER NOT NULL,
                 restaurant_id INTEGER NOT NULL,
                 created_at TEXT NOT NULL,
-                PRIMARY PRIMARY KEY (user_id, restaurant_id)
+                PRIMARY KEY (user_id, restaurant_id)
             )
             """
         )
