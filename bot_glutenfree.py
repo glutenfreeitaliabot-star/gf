@@ -1,6 +1,7 @@
 import math
 import sqlite3
 import os
+import random
 from contextlib import closing
 from datetime import datetime
 from typing import Optional
@@ -28,7 +29,7 @@ from telegram.ext import (
 # ==========================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")  # per /stats, notifiche, ecc.
+ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")  # per /stats, /raffle, notifiche, ecc.
 DB_PATH = "restaurants.db"
 
 PAGE_SIZE = 5
@@ -170,8 +171,8 @@ def set_user_min_rating(user_id: int, value: Optional[float]):
 
 def add_referral(referrer_id: int, referred_id: int) -> bool:
     """
-    Ritorna True se è stato inserito un nuovo referral, False se già esisteva.
-    Ignora il caso in cui referrer_id == referred_id (non si invita da soli).
+    Ritorna True se è stato inserito un nuovo referral, False se già esisteva
+    o se l'utente si è auto-referenziato.
     """
     if referrer_id == referred_id:
         return False
@@ -200,7 +201,6 @@ def add_referral(referrer_id: int, referred_id: int) -> bool:
         except Exception:
             return False
 
-        # Controllo se l'inserimento è effettivamente avvenuto
         cur.execute(
             """
             SELECT COUNT(*) FROM referrals
@@ -748,19 +748,18 @@ async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # 1) Messaggio con lista e pulsanti "Dettagli" + pagine
+    # 1) lista locali + inline keyboard
     await update.message.reply_text(
         text,
         parse_mode="HTML",
         reply_markup=kb,
     )
 
-    # 2) Secondo messaggio che ripristina il menu principale in basso
+    # 2) ripristino menu principale
     await update.message.reply_text(
         "Puoi continuare dal menu qui sotto 👇",
         reply_markup=main_keyboard(),
     )
-
 
 
 # ==========================
@@ -955,6 +954,18 @@ async def invite_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     link = f"https://t.me/{bot_username}?start=ref_{user.id}"
 
     ref_count = count_referrals(user.id)
+    needed = max(0, 5 - ref_count)
+
+    if needed > 0:
+        progress_line = (
+            f"Al momento hai portato: <b>{ref_count}</b> utenti.\n"
+            f"Te ne mancano <b>{needed}</b> per entrare nell'estrazione del buono Amazon da 10€ 🎁"
+        )
+    else:
+        progress_line = (
+            f"Al momento hai portato: <b>{ref_count}</b> utenti. 🎉\n"
+            "Sei già tra i partecipanti all'estrazione del buono Amazon da 10€!"
+        )
 
     msg = (
         "👥 <b>Presenta un amico</b>\n\n"
@@ -963,7 +974,7 @@ async def invite_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Regola del gioco:\n"
         "• Porta almeno <b>5 nuovi utenti</b> nel bot (e nella community)\n"
         "• Parteciperai all'estrazione di un <b>buono Amazon da 10€</b> 🎁\n\n"
-        f"Al momento hai portato: <b>{ref_count}</b> utenti."
+        f"{progress_line}"
     )
 
     await update.message.reply_text(msg, parse_mode="HTML", reply_markup=main_keyboard())
@@ -1066,6 +1077,56 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<b>👥 Top referrer</b>\n"
         f"{ref_block}"
     )
+
+    await update.message.reply_text(msg, parse_mode="HTML")
+
+
+# ==========================
+# /RAFFLE — ESTRAZIONE BUONO AMAZON
+# ==========================
+
+async def raffle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+
+    # Solo admin
+    if ADMIN_CHAT_ID and str(user.id) != str(ADMIN_CHAT_ID):
+        await update.message.reply_text("Questo comando è riservato all'amministratore del bot.")
+        return
+
+    with closing(get_conn()) as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT referrer_id, COUNT(*) AS c
+            FROM referrals
+            GROUP BY referrer_id
+            HAVING c >= 5
+            """
+        )
+        rows = cur.fetchall()
+
+    if not rows:
+        await update.message.reply_text(
+            "Nessun utente ha ancora raggiunto 5 referral validi. Nessuna estrazione possibile."
+        )
+        return
+
+    # Costruisco elenco partecipanti
+    participants = [(ref_id, c) for (ref_id, c) in rows]
+
+    # Estraggo a caso uno dei referrer
+    winner_ref_id, winner_count = random.choice(participants)
+
+    # Messaggio riepilogo
+    lines = ["👥 <b>Partecipanti all'estrazione (≥5 referral)</b>:\n"]
+    for ref_id, count in participants:
+        prefix = "⭐ " if ref_id == winner_ref_id else "• "
+        lines.append(f"{prefix}<code>{ref_id}</code> – {count} utenti invitati")
+
+    lines.append("\n🎉 <b>Vincitore estrazione buono Amazon 10€</b>:\n")
+    lines.append(f"👉 <code>{winner_ref_id}</code> (ha invitato {winner_count} utenti)")
+
+    msg = "\n".join(lines)
 
     await update.message.reply_text(msg, parse_mode="HTML")
 
@@ -1210,6 +1271,7 @@ def build_application():
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("stats", stats_command))
     app.add_handler(CommandHandler("invite", invite_command))
+    app.add_handler(CommandHandler("raffle", raffle_command))
 
     app.add_handler(MessageHandler(filters.LOCATION, handle_location))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
