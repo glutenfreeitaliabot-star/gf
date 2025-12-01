@@ -28,7 +28,7 @@ from telegram.ext import (
 # ==========================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")  # per /stats e notifiche suggerimenti
+ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")  # per /stats, notifiche, ecc.
 DB_PATH = "restaurants.db"
 
 PAGE_SIZE = 5
@@ -113,6 +113,19 @@ def ensure_schema():
             """
         )
 
+        # Referral (presenta un amico)
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS referrals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                referrer_id INTEGER NOT NULL,
+                referred_id INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(referrer_id, referred_id)
+            )
+            """
+        )
+
         conn.commit()
 
 
@@ -149,6 +162,65 @@ def set_user_min_rating(user_id: int, value: Optional[float]):
                 (user_id, value, value),
             )
         conn.commit()
+
+
+# ==========================
+# REFERRAL UTILS
+# ==========================
+
+def add_referral(referrer_id: int, referred_id: int) -> bool:
+    """
+    Ritorna True se è stato inserito un nuovo referral, False se già esisteva.
+    Ignora il caso in cui referrer_id == referred_id (non si invita da soli).
+    """
+    if referrer_id == referred_id:
+        return False
+
+    with closing(get_conn()) as conn:
+        cur = conn.cursor()
+
+        # Se l'utente è già stato referenziato da qualcuno, non lo ricontiamo
+        cur.execute(
+            "SELECT COUNT(*) FROM referrals WHERE referred_id = ?",
+            (referred_id,),
+        )
+        already = cur.fetchone()[0] or 0
+        if already > 0:
+            return False
+
+        try:
+            cur.execute(
+                """
+                INSERT OR IGNORE INTO referrals (referrer_id, referred_id, created_at)
+                VALUES (?, ?, ?)
+                """,
+                (referrer_id, referred_id, datetime.utcnow().isoformat()),
+            )
+            conn.commit()
+        except Exception:
+            return False
+
+        # Controllo se l'inserimento è effettivamente avvenuto
+        cur.execute(
+            """
+            SELECT COUNT(*) FROM referrals
+            WHERE referrer_id = ? AND referred_id = ?
+            """,
+            (referrer_id, referred_id),
+        )
+        ok = cur.fetchone()[0] or 0
+        return ok > 0
+
+
+def count_referrals(referrer_id: int) -> int:
+    with closing(get_conn()) as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT COUNT(*) FROM referrals WHERE referrer_id = ?",
+            (referrer_id,),
+        )
+        row = cur.fetchone()
+    return row[0] or 0 if row else 0
 
 
 # ==========================
@@ -483,10 +555,38 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     log_usage(user.id, "start")
 
+    # Gestione deep-link referral: /start ref_<id>
+    args = getattr(context, "args", []) or []
+    if args:
+        first_arg = args[0]
+        if first_arg.startswith("ref_"):
+            ref_id_str = first_arg[4:]
+            try:
+                ref_id = int(ref_id_str)
+            except ValueError:
+                ref_id = None
+
+            if ref_id:
+                is_new_ref = add_referral(ref_id, user.id)
+                if is_new_ref:
+                    log_usage(user.id, f"referred_by:{ref_id}")
+                    # opzionale: messaggio al referrer
+                    try:
+                        await context.bot.send_message(
+                            chat_id=ref_id,
+                            text=(
+                                f"🎉 Un nuovo utente ha iniziato a usare GlutenFreeBot dal tuo link!\n"
+                                f"ID nuovo utente: {user.id}"
+                            ),
+                        )
+                    except Exception:
+                        pass
+
     await update.message.reply_text(
         f"Ciao {user.first_name}!\n\n"
         "Benvenuto in <b>GlutenFreeBot</b> 🧡\n"
-        "Ti aiuto a trovare ristoranti e prodotti senza glutine.",
+        "Ti aiuto a trovare ristoranti e prodotti senza glutine.\n\n"
+        "Hai già visto il nuovo sistema <b>Presenta un amico</b>? Usa il comando /invite 👥",
         parse_mode="HTML",
         reply_markup=main_keyboard(),
     )
@@ -499,7 +599,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Cercare vicino a te\n"
         "• Gestire i preferiti\n"
         "• Aprire lo Shop Amazon 🛒\n"
-        "• Suggerire nuove città",
+        "• Suggerire nuove città\n"
+        "• Invitare amici con /invite",
         reply_markup=main_keyboard(),
     )
 
@@ -835,6 +936,32 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ==========================
+# /INVITE — PRESENTA UN AMICO
+# ==========================
+
+async def invite_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    log_usage(user.id, "invite")
+
+    bot_username = context.bot.username or "GlutenFreeBot"
+    link = f"https://t.me/{bot_username}?start=ref_{user.id}"
+
+    ref_count = count_referrals(user.id)
+
+    msg = (
+        "👥 <b>Presenta un amico</b>\n\n"
+        "Condividi questo link personale per invitare amici a usare <b>GlutenFreeBot</b>:\n\n"
+        f"<code>{link}</code>\n\n"
+        "Regola del gioco:\n"
+        "• Porta almeno <b>5 nuovi utenti</b> nel bot (e nella community)\n"
+        "• Parteciperai all'estrazione di un <b>buono Amazon da 10€</b> 🎁\n\n"
+        f"Al momento hai portato: <b>{ref_count}</b> utenti."
+    )
+
+    await update.message.reply_text(msg, parse_mode="HTML", reply_markup=main_keyboard())
+
+
+# ==========================
 # /STATS — STATISTICHE USO BOT
 # ==========================
 
@@ -880,6 +1007,18 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         city_rows = cur.fetchall()
 
+        # Top referrer
+        cur.execute(
+            """
+            SELECT referrer_id, COUNT(*) AS c
+            FROM referrals
+            GROUP BY referrer_id
+            ORDER BY c DESC
+            LIMIT 5
+            """
+        )
+        ref_rows = cur.fetchall()
+
     # Eventi
     if events_rows:
         events_lines = [f"• {ev}: {c}" for ev, c in events_rows]
@@ -901,6 +1040,13 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         city_block = "Nessuna ricerca città registrata."
 
+    # Referral
+    if ref_rows:
+        ref_lines = [f"• {ref_id}: {c} utenti" for ref_id, c in ref_rows]
+        ref_block = "\n".join(ref_lines)
+    else:
+        ref_block = "Nessun referral registrato."
+
     msg = (
         "<b>📊 Stats GlutenFreeBot</b>\n\n"
         f"• Eventi totali: <b>{total_events}</b>\n"
@@ -908,7 +1054,9 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<b>🔝 Eventi più usati</b>\n"
         f"{events_block}\n\n"
         "<b>🏙 Città più cercate</b>\n"
-        f"{city_block}"
+        f"{city_block}\n\n"
+        "<b>👥 Top referrer</b>\n"
+        f"{ref_block}"
     )
 
     await update.message.reply_text(msg, parse_mode="HTML")
@@ -1053,6 +1201,7 @@ def build_application():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("stats", stats_command))
+    app.add_handler(CommandHandler("invite", invite_command))
 
     app.add_handler(MessageHandler(filters.LOCATION, handle_location))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
