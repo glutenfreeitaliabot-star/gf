@@ -351,6 +351,68 @@ def build_city_page(user_id: int, city: str, page: int, category: Optional[str] 
     return "\n".join(msg_lines), kb
 
 
+def build_nearby_page(user_id: int, lat: float, lon: float, radius_km: float, page: int):
+    """
+    Lista paginata dei locali vicino alla posizione.
+    """
+    rows = query_nearby(lat, lon, user_id, max_distance_km=radius_km)
+    if not rows:
+        return None, None
+
+    total = len(rows)
+    total_pages = (total + PAGE_SIZE - 1) // PAGE_SIZE
+    page = max(0, min(page, total_pages - 1))
+
+    start = page * PAGE_SIZE
+    end = start + PAGE_SIZE
+    subset = rows[start:end]
+
+    msg_lines = [
+        f"📍 Locali entro <b>{radius_km} km</b> — trovati <b>{total}</b> (pagina {page+1}/{total_pages}):\n"
+    ]
+
+    kb_rows = []
+
+    for i, r in enumerate(subset, start=start + 1):
+        rid, name, city, address, notes, rating, rlat, rlon, last_update = r[:9]
+        rating_str = f"{rating:.1f}⭐" if rating is not None else "n.d."
+        d = haversine_km(lat, lon, rlat, rlon)
+        if d is None:
+            dist_str = "n.d."
+        elif d < 1:
+            dist_str = f"{d*1000:.0f} m"
+        else:
+            dist_str = f"{d:.1f} km"
+
+        msg_lines.append(f"{i}. {name} – {city} – {rating_str} – {dist_str}")
+        kb_rows.append([InlineKeyboardButton(f"Dettagli {i}", callback_data=f"details:{rid}")])
+
+    # navigazione
+    nav = []
+    lat_str = f"{lat:.5f}"
+    lon_str = f"{lon:.5f}"
+    radius_str = f"{radius_km:.2f}"
+    if page > 0:
+        nav.append(
+            InlineKeyboardButton(
+                "⬅️",
+                callback_data=f"nearpage:{lat_str}:{lon_str}:{radius_str}:{page-1}",
+            )
+        )
+    if page < total_pages - 1:
+        nav.append(
+            InlineKeyboardButton(
+                "➡️",
+                callback_data=f"nearpage:{lat_str}:{lon_str}:{radius_str}:{page+1}",
+            )
+        )
+    if nav:
+        kb_rows.append(nav)
+
+    kb = InlineKeyboardMarkup(kb_rows)
+    return "\n".join(msg_lines), kb
+
+
 # ==========================
 # FAVORITI & FOTO
 # ==========================
@@ -576,9 +638,9 @@ async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lat, lon = loc.latitude, loc.longitude
 
     radius = context.user_data.get("nearby_radius_km", 5)
-    rows = query_nearby(lat, lon, user.id, max_distance_km=radius)
 
-    if not rows:
+    text, kb = build_nearby_page(user.id, lat, lon, radius_km=radius, page=0)
+    if text is None:
         await update.message.reply_text(
             f"Nessun locale trovato entro {radius} km.",
             reply_markup=main_keyboard(),
@@ -586,20 +648,10 @@ async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text(
-        f"Trovati <b>{len(rows)}</b> locali entro {radius} km:",
+        text,
         parse_mode="HTML",
-        reply_markup=main_keyboard(),
+        reply_markup=kb,
     )
-
-    for r in rows[:15]:
-        text, rid = format_restaurant_row(r, user_location=(lat, lon))
-        kb = InlineKeyboardMarkup(
-            [
-                [InlineKeyboardButton("⭐ Preferito", callback_data=f"fav:{rid}")],
-                [InlineKeyboardButton("📷 Aggiungi foto", callback_data=f"photo:{rid}")],
-            ]
-        )
-        await update.message.reply_text(text, parse_mode="HTML", reply_markup=kb)
 
 
 # ==========================
@@ -887,7 +939,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer()
         return
 
-    # --- PAGINE ---
+    # --- PAGINE CITTÀ ---
     if data.startswith("page:"):
         _, city, page_str, category_token = data.split(":", 3)
         category = None if category_token == "ALL" else category_token
@@ -897,6 +949,23 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(text, parse_mode="HTML", reply_markup=kb)
         else:
             await query.message.reply_text("Nessun risultato disponibile.")
+        await query.answer()
+        return
+
+    # --- PAGINE VICINO A ME ---
+    if data.startswith("nearpage:"):
+        # nearpage:<lat>:<lon>:<radius_km>:<page>
+        _, lat_s, lon_s, rad_s, page_s = data.split(":", 4)
+        lat = float(lat_s)
+        lon = float(lon_s)
+        radius_km = float(rad_s)
+        page = int(page_s)
+
+        text, kb = build_nearby_page(user.id, lat, lon, radius_km=radius_km, page=page)
+        if text:
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=kb)
+        else:
+            await query.message.reply_text("Nessun risultato disponibile per questo raggio.")
         await query.answer()
         return
 
@@ -1010,4 +1079,3 @@ if __name__ == "__main__":
     application = build_application()
     print("🤖 GlutenFreeBot avviato...")
     application.run_polling()
-
