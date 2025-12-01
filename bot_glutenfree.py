@@ -3,7 +3,7 @@ import sqlite3
 import os
 from contextlib import closing
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional
 
 from import_app_restaurants import import_app_restaurants
 
@@ -19,7 +19,6 @@ from telegram.ext import (
     CommandHandler,
     MessageHandler,
     CallbackQueryHandler,
-    ConversationHandler,
     ContextTypes,
     filters,
 )
@@ -29,16 +28,13 @@ from telegram.ext import (
 # ==========================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")  # per notifiche suggerimenti / stats
+ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")  # per /stats e notifiche suggerimenti
 DB_PATH = "restaurants.db"
 
 PAGE_SIZE = 5
 
-# Conversation states (se in futuro riattiviamo /aggiungi ristorante)
-ADD_NAME, ADD_CITY, ADD_ADDRESS, ADD_NOTES = range(4)
-
 # pending foto per ristorante
-pending_photo_for_user = {}
+pending_photo_for_user: dict[int, int] = {}
 
 
 # ==========================
@@ -51,8 +47,9 @@ def get_conn():
 
 def ensure_schema():
     """
-    Crea / aggiorna le tabelle che NON sono 'restaurants'
-    (gestita da import_app_restaurants).
+    Crea / aggiorna le tabelle di supporto.
+    La tabella 'restaurants' è gestita da import_app_restaurants.py
+    e NON viene toccata qui.
     """
     with closing(get_conn()) as conn:
         cur = conn.cursor()
@@ -92,7 +89,7 @@ def ensure_schema():
             """
         )
 
-        # Eventi di utilizzo (per statistiche)
+        # Eventi di utilizzo (/stats)
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS usage_events (
@@ -226,27 +223,25 @@ def format_restaurant_row(row, user_location=None):
 # QUERY RISTORANTI
 # ==========================
 
+def _restaurants_has_types(cur) -> bool:
+    cur.execute("PRAGMA table_info(restaurants)")
+    cols = [c[1].lower() for c in cur.fetchall()]
+    return "types" in cols
+
+
 def query_by_city(city: str, user_id: int, category: Optional[str] = None):
-    """
-    category: una delle categorie (bar, cafe, bakery, ...), se disponibile nei types.
-    Se il DB non ha colonna 'types', il filtro categoria viene ignorato.
-    """
     settings = get_user_settings(user_id)
     min_rating = settings.get("min_rating")
 
     with closing(get_conn()) as conn:
         cur = conn.cursor()
 
-        # Verifichiamo se la tabella ha la colonna 'types'
-        cur.execute("PRAGMA table_info(restaurants)")
-        cols = [c[1].lower() for c in cur.fetchall()]
-        has_types = "types" in cols
+        has_types = _restaurants_has_types(cur)
 
         select_sql = "SELECT id, name, city, address, notes, rating, lat, lon, last_update"
         if has_types:
             select_sql += ", types"
         select_sql += " FROM restaurants WHERE LOWER(city) = LOWER(?)"
-
         params = [city]
 
         if category and has_types:
@@ -271,9 +266,7 @@ def query_nearby(lat: float, lon: float, user_id: int, max_distance_km: Optional
     with closing(get_conn()) as conn:
         cur = conn.cursor()
 
-        cur.execute("PRAGMA table_info(restaurants)")
-        cols = [c[1].lower() for c in cur.fetchall()]
-        has_types = "types" in cols
+        has_types = _restaurants_has_types(cur)
 
         select_sql = "SELECT id, name, city, address, notes, rating, lat, lon, last_update"
         if has_types:
@@ -366,9 +359,7 @@ def get_favorites(user_id: int):
     with closing(get_conn()) as conn:
         cur = conn.cursor()
 
-        cur.execute("PRAGMA table_info(restaurants)")
-        cols = [c[1].lower() for c in cur.fetchall()]
-        has_types = "types" in cols
+        has_types = _restaurants_has_types(cur)
 
         select_sql = "SELECT r.id, r.name, r.city, r.address, r.notes, r.rating, r.lat, r.lon, r.last_update"
         if has_types:
@@ -445,7 +436,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Cercare per città\n"
         "• Cercare vicino a te\n"
         "• Gestire i preferiti\n"
-        "• Aprire lo Shop Amazon 🛒",
+        "• Aprire lo Shop Amazon 🛒\n"
+        "• Suggerire nuove città",
         reply_markup=main_keyboard(),
     )
 
@@ -705,92 +697,6 @@ async def handle_suggest_city(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
         except Exception:
             pass
-            
-# ==========================
-# STATS / USO BOT (solo admin)
-# ==========================
-
-async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-
-    # se è configurato ADMIN_CHAT_ID, limito a lui
-    if ADMIN_CHAT_ID and str(user.id) != str(ADMIN_CHAT_ID):
-        await update.message.reply_text("Questo comando è riservato all'amministratore del bot.")
-        return
-
-    with closing(get_conn()) as conn:
-        cur = conn.cursor()
-
-        # Totale eventi e utenti unici
-        cur.execute("SELECT COUNT(*), COUNT(DISTINCT user_id) FROM usage_events")
-        row = cur.fetchone()
-        total_events = row[0] or 0
-        total_users = row[1] or 0
-
-        # Eventi più usati
-        cur.execute(
-            """
-            SELECT event, COUNT(*) AS c
-            FROM usage_events
-            GROUP BY event
-            ORDER BY c DESC
-            LIMIT 10
-            """
-        )
-        events_rows = cur.fetchall()
-
-        # Città più cercate (search_city:<city>)
-        cur.execute(
-            """
-            SELECT event, COUNT(*) AS c
-            FROM usage_events
-            WHERE event LIKE 'search_city:%'
-            GROUP BY event
-            ORDER BY c DESC
-            LIMIT 10
-            """
-        )
-        city_rows = cur.fetchall()
-
-    # Format eventi
-    if events_rows:
-        events_lines = []
-        for ev, c in events_rows:
-            events_lines.append(f"• {ev}: {c}")
-        events_block = "\n".join(events_lines)
-    else:
-        events_block = "Nessun evento registrato."
-
-    # Format città
-    if city_rows:
-        city_counts = {}
-        for ev, c in city_rows:
-            # event tipo: "search_city:Bari"
-            parts = ev.split(":", 1)
-            if len(parts) == 2:
-                city = parts[1]
-            else:
-                city = ev
-            city_counts[city] = city_counts.get(city, 0) + c
-
-        top_cities = sorted(city_counts.items(), key=lambda x: x[1], reverse=True)[:5]
-        city_lines = [f"• {city}: {cnt}" for city, cnt in top_cities]
-        city_block = "\n".join(city_lines)
-    else:
-        city_block = "Nessuna ricerca città registrata."
-
-    msg = (
-        "<b>📊 Stats GlutenFreeBot</b>\n\n"
-        f"• Eventi totali: <b>{total_events}</b>\n"
-        f"• Utenti unici: <b>{total_users}</b>\n\n"
-        "<b>🔝 Eventi più usati</b>\n"
-        f"{events_block}\n\n"
-        "<b>🏙 Città più cercate</b>\n"
-        f"{city_block}"
-    )
-
-    await update.message.reply_text(msg, parse_mode="HTML")
-
 
 
 # ==========================
@@ -877,6 +783,86 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ==========================
+# /STATS — STATISTICHE USO BOT
+# ==========================
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+
+    # Se è configurato ADMIN_CHAT_ID, limito l'accesso
+    if ADMIN_CHAT_ID and str(user.id) != str(ADMIN_CHAT_ID):
+        await update.message.reply_text("Questo comando è riservato all'amministratore del bot.")
+        return
+
+    with closing(get_conn()) as conn:
+        cur = conn.cursor()
+
+        # Totale eventi e utenti unici
+        cur.execute("SELECT COUNT(*), COUNT(DISTINCT user_id) FROM usage_events")
+        row = cur.fetchone() or (0, 0)
+        total_events = row[0] or 0
+        total_users = row[1] or 0
+
+        # Eventi più usati
+        cur.execute(
+            """
+            SELECT event, COUNT(*) AS c
+            FROM usage_events
+            GROUP BY event
+            ORDER BY c DESC
+            LIMIT 10
+            """
+        )
+        events_rows = cur.fetchall()
+
+        # Città più cercate
+        cur.execute(
+            """
+            SELECT event, COUNT(*) AS c
+            FROM usage_events
+            WHERE event LIKE 'search_city:%'
+            GROUP BY event
+            ORDER BY c DESC
+            LIMIT 20
+            """
+        )
+        city_rows = cur.fetchall()
+
+    # Eventi
+    if events_rows:
+        events_lines = [f"• {ev}: {c}" for ev, c in events_rows]
+        events_block = "\n".join(events_lines)
+    else:
+        events_block = "Nessun evento registrato."
+
+    # Città
+    if city_rows:
+        city_counts = {}
+        for ev, c in city_rows:
+            parts = ev.split(":", 1)
+            city = parts[1] if len(parts) == 2 else ev
+            city_counts[city] = city_counts.get(city, 0) + c
+
+        top_cities = sorted(city_counts.items(), key=lambda x: x[1], reverse=True)[:10]
+        city_lines = [f"• {city}: {cnt}" for city, cnt in top_cities]
+        city_block = "\n".join(city_lines)
+    else:
+        city_block = "Nessuna ricerca città registrata."
+
+    msg = (
+        "<b>📊 Stats GlutenFreeBot</b>\n\n"
+        f"• Eventi totali: <b>{total_events}</b>\n"
+        f"• Utenti unici: <b>{total_users}</b>\n\n"
+        "<b>🔝 Eventi più usati</b>\n"
+        f"{events_block}\n\n"
+        "<b>🏙 Città più cercate</b>\n"
+        f"{city_block}"
+    )
+
+    await update.message.reply_text(msg, parse_mode="HTML")
+
+
+# ==========================
 # CALLBACK HANDLER
 # ==========================
 
@@ -919,9 +905,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rid = int(data.split(":")[1])
         with closing(get_conn()) as conn:
             cur = conn.cursor()
-            cur.execute("PRAGMA table_info(restaurants)")
-            cols = [c[1].lower() for c in cur.fetchall()]
-            has_types = "types" in cols
+            has_types = _restaurants_has_types(cur)
 
             select_sql = "SELECT id, name, city, address, notes, rating, lat, lon, last_update"
             if has_types:
@@ -999,6 +983,7 @@ def build_application():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("stats", stats_command))
 
     app.add_handler(MessageHandler(filters.LOCATION, handle_location))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
@@ -1025,3 +1010,4 @@ if __name__ == "__main__":
     application = build_application()
     print("🤖 GlutenFreeBot avviato...")
     application.run_polling()
+
