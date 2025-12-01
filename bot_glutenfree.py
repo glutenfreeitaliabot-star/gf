@@ -748,11 +748,19 @@ async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # 1) Messaggio con lista e pulsanti "Dettagli" + pagine
     await update.message.reply_text(
         text,
         parse_mode="HTML",
         reply_markup=kb,
     )
+
+    # 2) Secondo messaggio che ripristina il menu principale in basso
+    await update.message.reply_text(
+        "Puoi continuare dal menu qui sotto 👇",
+        reply_markup=main_keyboard(),
+    )
+
 
 
 # ==========================
