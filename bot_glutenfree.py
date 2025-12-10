@@ -384,6 +384,9 @@ def extract_categories(rows):
 
 
 def build_city_page(user_id: int, city: str, page: int, category: Optional[str] = None):
+    rows = query_by_city(city, user.id, category) if False else query_by_city(city, user_id, category)
+    # (hack sopra per mantenere compatibilità mentale: ignore "user" shadow)
+
     rows = query_by_city(city, user_id, category)
     if not rows:
         return None, None
@@ -620,9 +623,22 @@ async def search_city(update: Update, context: ContextTypes.DEFAULT_TYPE, city_t
 
     rows = query_by_city(city, user.id, category=None)
     if not rows:
+        # Nessun locale: proponi subito la segnalazione
+        kb = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "💡 Sì, segnala questa città all'admin",
+                        callback_data=f"suggest_now:{city}",
+                    )
+                ]
+            ]
+        )
         await update.message.reply_text(
-            f"Non ho ancora locali per <b>{city}</b>.",
+            f"Non ho ancora locali per <b>{city}</b>.\n\n"
+            "Vuoi segnalarci questa città così proviamo a dare priorità all'aggiornamento del database?",
             parse_mode="HTML",
+            reply_markup=kb,
         )
         return
 
@@ -678,6 +694,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # Fase: attendo città suggerita (da flow generico o da posizione senza risultati)
+    if context.user_data.get("awaiting_suggest_city"):
+        context.user_data["awaiting_suggest_city"] = False
+        await handle_suggest_city(update, context, text)
+        return
+
     # Menu principale
     if text == "🔍 Cerca per città":
         log_usage(user.id, "menu_search_city")
@@ -715,11 +737,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Scrivimi la città che vorresti vedere analizzata:")
         return
 
-    if context.user_data.get("awaiting_suggest_city"):
-        context.user_data["awaiting_suggest_city"] = False
-        await handle_suggest_city(update, context, text)
-        return
-
     # fallback
     await update.message.reply_text(
         "Non ho capito. Usa il menu qui sotto 👇",
@@ -740,8 +757,31 @@ async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     radius = context.user_data.get("nearby_radius_km", 5)
 
+    # Pre-calcolo righe per statistiche e gestione "nessun risultato"
+    rows = query_nearby(lat, lon, user.id, max_distance_km=radius)
+    if not rows:
+        await update.message.reply_text(
+            f"Nessun locale trovato entro {radius} km.\n\n"
+            "Vuoi segnalarci la tua città così proviamo ad aggiungere nuovi locali al database?\n"
+            "Scrivi qui sotto il nome della città.",
+            reply_markup=main_keyboard(),
+        )
+        context.user_data["awaiting_suggest_city"] = True
+        return
+
+    # Ricava una città "dominante" dai risultati e salvala nelle stats
+    city_counts = {}
+    for r in rows:
+        city_name = r[2] or ""
+        if city_name:
+            city_counts[city_name] = city_counts.get(city_name, 0) + 1
+    if city_counts:
+        top_city = sorted(city_counts.items(), key=lambda x: x[1], reverse=True)[0][0]
+        log_usage(user.id, f"location_city:{top_city}")
+
     text, kb = build_nearby_page(user.id, lat, lon, radius_km=radius, page=0)
     if text is None:
+        # fallback di sicurezza, anche se non dovrebbe capitare qui
         await update.message.reply_text(
             f"Nessun locale trovato entro {radius} km.",
             reply_markup=main_keyboard(),
@@ -1013,7 +1053,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         events_rows = cur.fetchall()
 
-        # Città più cercate
+        # Città più cercate (ricerca per testo)
         cur.execute(
             """
             SELECT event, COUNT(*) AS c
@@ -1021,10 +1061,36 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             WHERE event LIKE 'search_city:%'
             GROUP BY event
             ORDER BY c DESC
-            LIMIT 20
+            LIMIT 50
             """
         )
         city_rows = cur.fetchall()
+
+        # Città più frequenti da posizione
+        cur.execute(
+            """
+            SELECT event, COUNT(*) AS c
+            FROM usage_events
+            WHERE event LIKE 'location_city:%'
+            GROUP BY event
+            ORDER BY c DESC
+            LIMIT 50
+            """
+        )
+        loc_rows = cur.fetchall()
+
+        # Locali più cliccati (dettagli)
+        cur.execute(
+            """
+            SELECT event, COUNT(*) AS c
+            FROM usage_events
+            WHERE event LIKE 'details_click:%'
+            GROUP BY event
+            ORDER BY c DESC
+            LIMIT 50
+            """
+        )
+        det_rows = cur.fetchall()
 
         # Top referrer
         cur.execute(
@@ -1045,7 +1111,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         events_block = "Nessun evento registrato."
 
-    # Città
+    # Città cercate per testo
     if city_rows:
         city_counts = {}
         for ev, c in city_rows:
@@ -1058,6 +1124,58 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         city_block = "\n".join(city_lines)
     else:
         city_block = "Nessuna ricerca città registrata."
+
+    # Città da posizione
+    if loc_rows:
+        loc_counts = {}
+        for ev, c in loc_rows:
+            parts = ev.split(":", 1)
+            city = parts[1] if len(parts) == 2 else ev
+            loc_counts[city] = loc_counts.get(city, 0) + c
+
+        top_loc_cities = sorted(loc_counts.items(), key=lambda x: x[1], reverse=True)[:10]
+        loc_lines = [f"• {city}: {cnt}" for city, cnt in top_loc_cities]
+        loc_block = "\n".join(loc_lines)
+    else:
+        loc_block = "Nessuna posizione con città stimata."
+
+    # Locali più cliccati
+    if det_rows:
+        # mappa ristorante_id -> count
+        det_counts = {}
+        for ev, c in det_rows:
+            parts = ev.split(":", 1)
+            rid_str = parts[1] if len(parts) == 2 else None
+            if not rid_str:
+                continue
+            try:
+                rid = int(rid_str)
+            except ValueError:
+                continue
+            det_counts[rid] = det_counts.get(rid, 0) + c
+
+        top_det = sorted(det_counts.items(), key=lambda x: x[1], reverse=True)[:10]
+        rids = [rid for rid, _ in top_det]
+
+        names_map = {}
+        if rids:
+            with closing(get_conn()) as conn:
+                cur = conn.cursor()
+                placeholders = ",".join("?" * len(rids))
+                cur.execute(
+                    f"SELECT id, name, city FROM restaurants WHERE id IN ({placeholders})",
+                    rids,
+                )
+                for rid, name, city in cur.fetchall():
+                    names_map[rid] = (name, city)
+
+        det_lines = []
+        for rid, cnt in top_det:
+            name, city = names_map.get(rid, (f"ID {rid}", "?"))
+            det_lines.append(f"• {name} – {city}: {cnt} click dettagli")
+        det_block = "\n".join(det_lines)
+    else:
+        det_block = "Nessun click dettagli registrato."
 
     # Referral
     if ref_rows:
@@ -1072,8 +1190,12 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• Utenti unici: <b>{total_users}</b>\n\n"
         "<b>🔝 Eventi più usati</b>\n"
         f"{events_block}\n\n"
-        "<b>🏙 Città più cercate</b>\n"
+        "<b>🏙 Città più cercate (testo)</b>\n"
         f"{city_block}\n\n"
+        "<b>📍 Zone più usate tramite posizione</b>\n"
+        f"{loc_block}\n\n"
+        "<b>🍽 Locali più cliccati (dettagli)</b>\n"
+        f"{det_block}\n\n"
         "<b>👥 Top referrer</b>\n"
         f"{ref_block}"
     )
@@ -1118,12 +1240,12 @@ async def raffle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     winner_ref_id, winner_count = random.choice(participants)
 
     # Messaggio riepilogo
-    lines = ["👥 <b>Partecipanti all'estrazione (≥5 referral)</b>:\n"]
+    lines = ["👥 <b>Partecipanti all'estrazione (≥5 referral)</b>\n"]
     for ref_id, count in participants:
         prefix = "⭐ " if ref_id == winner_ref_id else "• "
         lines.append(f"{prefix}<code>{ref_id}</code> – {count} utenti invitati")
 
-    lines.append("\n🎉 <b>Vincitore estrazione buono Amazon 10€</b>:\n")
+    lines.append("\n🎉 <b>Vincitore estrazione buono Amazon 10€</b>\n")
     lines.append(f"👉 <code>{winner_ref_id}</code> (ha invitato {winner_count} utenti)")
 
     msg = "\n".join(lines)
@@ -1139,6 +1261,40 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     data = query.data
     user = query.from_user
+
+    # --- SUGGERISCI CITTÀ DA INLINE (NESSUN RISULTATO) ---
+    if data.startswith("suggest_now:"):
+        city = data.split(":", 1)[1]
+        with closing(get_conn()) as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO suggested_cities (user_id, city, created_at)
+                VALUES (?, ?, ?)
+                """,
+                (user.id, city, datetime.utcnow().isoformat()),
+            )
+            conn.commit()
+
+        log_usage(user.id, f"suggest_city_inline:{city}")
+
+        await query.message.reply_text(
+            f"Grazie! Ho segnalato <b>{city}</b> all'admin, cercheremo di aggiornare presto il database.",
+            parse_mode="HTML",
+        )
+
+        if ADMIN_CHAT_ID:
+            try:
+                app = context.application
+                await app.bot.send_message(
+                    chat_id=int(ADMIN_CHAT_ID),
+                    text=f"💡 Segnalazione città (inline) da {user.id} ({user.first_name}): {city}",
+                )
+            except Exception:
+                pass
+
+        await query.answer()
+        return
 
     # --- FILTRO CATEGORIA ---
     if data.startswith("cat:"):
@@ -1188,7 +1344,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # --- DETTAGLI ---
     if data.startswith("details:"):
-        rid = int(data.split(":")[1])
+        rid = int(data.split(":", 1)[1])
         with closing(get_conn()) as conn:
             cur = conn.cursor()
             has_types = _restaurants_has_types(cur)
@@ -1206,6 +1362,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer()
             return
 
+        # Logghiamo il click su un ristorante dopo una ricerca
+        log_usage(user.id, f"details_click:{rid}")
+
         text, rid = format_restaurant_row(row)
         kb = InlineKeyboardMarkup(
             [
@@ -1219,7 +1378,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # --- PREFERITO ---
     if data.startswith("fav:"):
-        rid = int(data.split(":")[1])
+        rid = int(data.split(":", 1)[1])
         add_favorite(user.id, rid)
         log_usage(user.id, f"fav:{rid}")
         await query.answer("Aggiunto ai preferiti ⭐")
@@ -1227,7 +1386,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # --- FOTO ---
     if data.startswith("photo:"):
-        rid = int(data.split(":")[1])
+        rid = int(data.split(":", 1)[1])
         pending_photo_for_user[user.id] = rid
         await query.message.reply_text("Inviami ora una foto del locale/piatto 📷")
         await query.answer()
@@ -1298,3 +1457,4 @@ if __name__ == "__main__":
     application = build_application()
     print("🤖 GlutenFreeBot avviato...")
     application.run_polling()
+
