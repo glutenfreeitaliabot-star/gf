@@ -899,67 +899,15 @@ async def handle_suggest_city(update: Update, context: ContextTypes.DEFAULT_TYPE
             pass
 
 
-# ==========================
-# SHOP AMAZON
-# ==========================
-
-SHOP_PRODUCTS = [
-    {
-        "name": "Mulino Bianco Senza Glutine — Biscotti",
-        "url": "https://amzn.to/4iuLj4T",
-    },
-    {
-        "name": "Biscotti senza glutine – prodotto 2",
-        "url": "https://www.amazon.it/Mulino-Bianco-Biscotti-Frollini-Cioccolato/dp/B07FKN8YRS?tag=glutenfreeita-21",
-    },
-]
-
-
 async def show_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await send_shop_page(update, page=0)
-
-
-async def send_shop_page(update_or_query, page: int):
-    per_page = 5
-    total = len(SHOP_PRODUCTS)
-    if total == 0:
-        msg = "Al momento non ho ancora prodotti da mostrarti."
-        if isinstance(update_or_query, Update):
-            await update_or_query.message.reply_text(msg, reply_markup=main_keyboard())
-        else:
-            await update_or_query.edit_message_text(msg)
-        return
-
-    total_pages = (total + per_page - 1) // per_page
-    page = max(0, min(page, total_pages - 1))
-
-    start = page * per_page
-    end = start + per_page
-    sub = SHOP_PRODUCTS[start:end]
-
-    msg = "<b>🛒 Prodotti consigliati senza glutine</b>\n\n"
-    for i, p in enumerate(sub, start=1):
-        msg += f"{i}. <a href=\"{p['url']}\">{p['name']}</a>\n"
-
-    kb_rows = []
-    nav = []
-    if page > 0:
-        nav.append(InlineKeyboardButton("⬅️", callback_data=f"shop:{page-1}"))
-    if page < total_pages - 1:
-        nav.append(InlineKeyboardButton("➡️", callback_data=f"shop:{page+1}"))
-    if nav:
-        kb_rows.append(nav)
-    kb = InlineKeyboardMarkup(kb_rows) if kb_rows else None
-
-    if isinstance(update_or_query, Update):
-        await update_or_query.message.reply_text(
-            msg, parse_mode="HTML", reply_markup=kb
-        )
-    else:
-        await update_or_query.edit_message_text(
-            msg, parse_mode="HTML", reply_markup=kb
-        )
-
+    await update.message.reply_text(
+        "🛒 <b>Shop Gluten Free</b>\n\n"
+        "Al momento non ci sono prodotti gluten free segnalati.\n\n"
+        "👉 Entra nel gruppo e segnalali lì: @GlutenfreeItalia_bot",
+        parse_mode="HTML",
+        reply_markup=main_keyboard(),
+        disable_web_page_preview=True
+    )
 
 # ==========================
 # FOTO
