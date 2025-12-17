@@ -586,10 +586,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         pass
 
     await update.message.reply_text(
-        f"Ciao {user.first_name}!\n\n"
-        "Benvenuto in <b>GlutenFreeBot</b> 🧡\n"
-        "Ti aiuto a trovare ristoranti e prodotti senza glutine.\n\n"
-        "Hai già visto il nuovo sistema <b>Presenta un amico</b>? Usa il comando /invite 👥",
+        f"Ciao 👋 benvenuto in <b>GlutenFreeBot</b> 🧡\n\n"
+        f"Qui trovi ristoranti, locali e segnalazioni\n"
+        f"pensate davvero per chi vive <b>senza glutine</b>.\n\n"
+        f"🍽 Cerca per città\n"
+        f"📍 Trova locali vicino a te\n"
+        f"⭐ Salva i tuoi preferiti\n"
+        f"🛒 Scopri prodotti (in arrivo)\n\n"
+        f"✨ Ma non finisce qui…\n\n"
+        f"Su Instagram raccontiamo il lato umano del gluten free:\n"
+        f"consigli veri, esperienze reali, nuove scoperte.\n\n"
+        f"📸 <a href=\"https://www.instagram.com/glutenfreebot?igsh=bzYxdXd3cDF0MTly&utm_source=qr\">@glutenfreebot</a>\n\n"
+        f"Seguilo. Qui il bot ti aiuta, lì ti ispiriamo.",
         parse_mode="HTML",
         reply_markup=main_keyboard(),
     )
