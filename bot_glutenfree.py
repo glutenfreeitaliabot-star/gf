@@ -272,8 +272,23 @@ def build_disclaimer(phone: Optional[str]) -> str:
     )
 
     if phone and str(phone).strip():
-        phone_clean = str(phone).strip().replace(" ", "")
+        raw_phone = str(phone).strip()
+
+        # rimuovo spazi, trattini, parentesi
+        phone_clean = (
+            raw_phone
+            .replace(" ", "")
+            .replace("-", "")
+            .replace("(", "")
+            .replace(")", "")
+        )
+
+        # aggiungo prefisso internazionale se manca
+        if not phone_clean.startswith("+") and not phone_clean.startswith("00"):
+            phone_clean = "+39" + phone_clean
+
         call_line = f'\n📞 <a href="tel:{phone_clean}">Chiama il ristorante</a>'
+
     else:
         call_line = "\n📞 Contatta direttamente il ristorante per conferma"
 
