@@ -1,50 +1,23 @@
 import csv
 import sqlite3
 from contextlib import closing
+from datetime import datetime
 
 DB_PATH = "restaurants.db"
 CSV_PATH = "app_restaurants.csv"
 
 
-def safe_float(value, field_name, row):
-    """
-    Converte automaticamente numeri con virgola → punto.
-    Esempio: "44,8324543" -> 44.8324543
-
-    Se non riesce, logga un warning e restituisce None.
-    """
-    if value is None:
-        return None
-
-    text = str(value).strip()
-    if text == "":
-        return None
-
-    # Prima prova: come sta
-    try:
-        return float(text)
-    except Exception:
-        pass
-
-    # Seconda prova: sostituisco la virgola col punto
-    if "," in text:
-        fixed = text.replace(",", ".")
-        try:
-            return float(fixed)
-        except Exception:
-            pass
-
-    # Se non funziona nemmeno così, segnalo
-    print(f"⚠️ Impossibile convertire {field_name}='{value}' nella riga: {row}")
-    return None
+def get_conn():
+    return sqlite3.connect(DB_PATH)
 
 
-def ensure_schema(cur):
-    """
-    Si assicura che la tabella restaurants esista
-    con tutte le colonne necessarie.
-    """
-    # Tabella base
+def _table_cols(cur, table: str) -> set:
+    cur.execute(f"PRAGMA table_info({table})")
+    return {r[1].lower() for r in cur.fetchall()}
+
+
+def _ensure_restaurants_has_cols(cur):
+    # crea restaurants se non esiste (base)
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS restaurants (
@@ -53,7 +26,7 @@ def ensure_schema(cur):
             city TEXT NOT NULL,
             address TEXT,
             notes TEXT,
-            source TEXT NOT NULL CHECK(source IN ('app', 'user')),
+            source TEXT NOT NULL,
             lat REAL,
             lon REAL,
             rating REAL,
@@ -62,108 +35,92 @@ def ensure_schema(cur):
         """
     )
 
-    # Migrazioni "dolci" per vecchi DB che non avevano le colonne
-    for col_def in [
-        ("lat", "REAL"),
-        ("lon", "REAL"),
-        ("rating", "REAL"),
-        ("last_update", "TEXT"),
-    ]:
-        col_name, col_type = col_def
-        try:
-            cur.execute(f"ALTER TABLE restaurants ADD COLUMN {col_name} {col_type};")
-            print(f"ℹ️ Aggiunta colonna mancante '{col_name}' alla tabella restaurants.")
-        except sqlite3.OperationalError:
-            # Colonna già esistente → nessun problema
-            pass
+    cols = _table_cols(cur, "restaurants")
+
+    def add_col_if_missing(col_name: str, col_def: str):
+        nonlocal cols
+        if col_name.lower() not in cols:
+            try:
+                cur.execute(f"ALTER TABLE restaurants ADD COLUMN {col_def}")
+                cols = _table_cols(cur, "restaurants")
+            except Exception:
+                pass
+
+    add_col_if_missing("phone", "phone TEXT")
+    add_col_if_missing("types", "types TEXT")
 
 
 def import_app_restaurants():
-    with closing(sqlite3.connect(DB_PATH)) as conn:
+    with closing(get_conn()) as conn:
         cur = conn.cursor()
 
-        # Mi assicuro che la tabella sia ok
-        ensure_schema(cur)
-        conn.commit()
+        _ensure_restaurants_has_cols(cur)
 
-        # Cancello i vecchi ristoranti source='app'
         print("🔄 Cancello vecchi ristoranti con source = 'app'...")
-        cur.execute("DELETE FROM restaurants WHERE source = 'app';")
+        cur.execute("DELETE FROM restaurants WHERE source = 'app'")
         conn.commit()
 
         print(f"📂 Leggo il file CSV: {CSV_PATH}")
 
-        with open(CSV_PATH, newline="", encoding="utf-8") as csvfile:
-            reader = csv.DictReader(csvfile)
+        inserted = 0
+        now = datetime.utcnow().isoformat()
 
-            if reader.fieldnames is None:
-                raise ValueError("Il CSV non ha intestazioni di colonna (riga 1 vuota?).")
+        with open(CSV_PATH, newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
 
-            fieldnames = [f.strip() for f in reader.fieldnames]
+            # normalizza header
+            fieldnames = [h.strip().lower() for h in (reader.fieldnames or [])]
+            # mappa colonne attese (tollerante)
+            def get(row, key):
+                return (row.get(key) or "").strip()
 
-            def has_field(name):
-                return name in fieldnames
+            for raw in reader:
+                # ricostruisci row case-insensitive
+                row = {}
+                for k, v in raw.items():
+                    if k is None:
+                        continue
+                    row[k.strip().lower()] = v
 
-            required = {"name", "city", "address", "notes"}
-            if not required.issubset(set(fieldnames)):
-                raise ValueError(
-                    f"Il CSV deve contenere almeno queste colonne: {sorted(required)}.\n"
-                    f"Colonne trovate: {fieldnames}"
-                )
-
-            count = 0
-            for row in reader:
-                # Normalizzo le chiavi (per sicurezza)
-                normalized_row = {k.strip(): v for k, v in row.items()}
-
-                name = (normalized_row.get("name") or "").strip()
-                city = (normalized_row.get("city") or "").strip()
-                address = (normalized_row.get("address") or "").strip()
-                notes = (normalized_row.get("notes") or "").strip()
-
+                name = get(row, "name")
+                city = get(row, "city")
                 if not name or not city:
-                    print(f"⚠️ Riga saltata (manca name o city): {normalized_row}")
                     continue
 
-                # Lat / Lon / Rating / Last_update se presenti
-                lat = safe_float(
-                    normalized_row.get("lat") if has_field("lat") else None,
-                    "lat",
-                    normalized_row,
-                )
-                lon = safe_float(
-                    normalized_row.get("lon") if has_field("lon") else None,
-                    "lon",
-                    normalized_row,
-                )
-                rating = safe_float(
-                    normalized_row.get("rating") if has_field("rating") else None,
-                    "rating",
-                    normalized_row,
-                )
+                address = get(row, "address") or None
+                notes = get(row, "notes") or None
 
-                last_update = (
-                    (normalized_row.get("last_update") or "").strip()
-                    if has_field("last_update")
-                    else ""
-                )
-                if last_update == "":
-                    last_update = None
+                lat_s = get(row, "lat")
+                lon_s = get(row, "lon")
+                rating_s = get(row, "rating")
+
+                phone = get(row, "phone") or None
+                types = get(row, "types") or None
+
+                try:
+                    lat = float(lat_s) if lat_s else None
+                except Exception:
+                    lat = None
+                try:
+                    lon = float(lon_s) if lon_s else None
+                except Exception:
+                    lon = None
+                try:
+                    rating = float(rating_s) if rating_s else None
+                except Exception:
+                    rating = None
+
+                last_update = get(row, "last_update") or now
 
                 cur.execute(
                     """
                     INSERT INTO restaurants
-                        (name, city, address, notes, source, lat, lon, rating, last_update)
-                    VALUES
-                        (?,    ?,    ?,       ?,     'app',  ?,   ?,   ?,      ?)
+                        (name, city, address, notes, source, lat, lon, rating, last_update, phone, types)
+                    VALUES (?, ?, ?, ?, 'app', ?, ?, ?, ?, ?, ?)
                     """,
-                    (name, city, address, notes, lat, lon, rating, last_update),
+                    (name, city, address, notes, lat, lon, rating, last_update, phone, types),
                 )
-                count += 1
+                inserted += 1
 
         conn.commit()
-        print(f"✅ Import completato. Ristoranti 'app' inseriti: {count}")
-
-
-if __name__ == "__main__":
-    import_app_restaurants()
+        print(f"✅ Import completato. Ristoranti 'app' inseriti: {inserted}")
