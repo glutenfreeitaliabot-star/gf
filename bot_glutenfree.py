@@ -32,11 +32,8 @@ ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")  # chat id admin per /stats e notific
 DB_PATH = "restaurants.db"
 
 PAGE_SIZE = 5
-
-# Stato semplice: se utente ha premuto "Aggiungi foto" salviamo a quale ristorante agganciare
 pending_photo_for_user = {}
 
-# Raggi disponibili (km)
 RADIUS_OPTIONS = [1, 3, 5, 10, 15, 20]
 
 
@@ -54,7 +51,6 @@ def ensure_schema():
     with closing(get_conn()) as conn:
         cur = conn.cursor()
 
-        # restaurants: includo types e phone direttamente nella create (se DB vecchio, non aggiunge ma ok)
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS restaurants (
@@ -64,8 +60,8 @@ def ensure_schema():
                 address TEXT,
                 notes TEXT,
                 source TEXT NOT NULL,
-                lat REAL,
-                lon REAL,
+                lat TEXT,
+                lon TEXT,
                 rating REAL,
                 last_update TEXT,
                 types TEXT,
@@ -74,7 +70,6 @@ def ensure_schema():
             """
         )
 
-        # favorites
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS favorites (
@@ -86,7 +81,6 @@ def ensure_schema():
             """
         )
 
-        # settings
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS user_settings (
@@ -96,7 +90,6 @@ def ensure_schema():
             """
         )
 
-        # reports
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS reports (
@@ -110,7 +103,6 @@ def ensure_schema():
             """
         )
 
-        # photos
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS photos (
@@ -123,7 +115,6 @@ def ensure_schema():
             """
         )
 
-        # usage events per /stats
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS usage_events (
@@ -258,10 +249,42 @@ def _to_float(v) -> Optional[float]:
         return None
     try:
         if isinstance(v, str):
-            v = v.strip().replace(",", ".")
+            v = v.strip()
+            if v == "":
+                return None
+            v = v.replace(",", ".")
         return float(v)
     except Exception:
         return None
+
+
+def _normalize_coords(lat_raw, lon_raw) -> Tuple[Optional[float], Optional[float]]:
+    """
+    Normalizza lat/lon anche se:
+    - stringhe con virgola
+    - spazi
+    - valori scambiati
+    - valori fuori range
+    """
+    lat = _to_float(lat_raw)
+    lon = _to_float(lon_raw)
+    if lat is None or lon is None:
+        return None, None
+
+    # fuori range -> prova swap
+    if abs(lat) > 90 or abs(lon) > 180:
+        lat, lon = lon, lat
+
+    # ancora fuori range => invalido
+    if abs(lat) > 90 or abs(lon) > 180:
+        return None, None
+
+    # Heuristica Italia: lat tipicamente 36-47, lon 6-19
+    # Se invertiti, swap
+    if (6 <= lat <= 19) and (36 <= lon <= 47):
+        lat, lon = lon, lat
+
+    return lat, lon
 
 
 def haversine_km(lat1, lon1, lat2, lon2) -> Optional[float]:
@@ -291,7 +314,6 @@ def main_keyboard():
 
 
 def radius_keyboard():
-    # layout a righe
     rows = [
         [f"{RADIUS_OPTIONS[0]} km", f"{RADIUS_OPTIONS[1]} km"],
         [f"{RADIUS_OPTIONS[2]} km", f"{RADIUS_OPTIONS[3]} km"],
@@ -321,9 +343,9 @@ def format_restaurant_detail(r: sqlite3.Row, user_location: Optional[Tuple[float
     rating = f"{float(rating_val):.1f}⭐" if rating_val is not None else "n.d."
     update_str = f" (aggiornato: {last_update})" if last_update else ""
 
+    lat, lon = _normalize_coords(r["lat"], r["lon"])
+
     distance_str = ""
-    lat = _to_float(r["lat"])
-    lon = _to_float(r["lon"])
     if user_location and lat is not None and lon is not None:
         d = haversine_km(user_location[0], user_location[1], lat, lon)
         if d is not None:
@@ -379,35 +401,39 @@ def query_by_city(city: str, user_id: int) -> List[sqlite3.Row]:
     return rows
 
 
-def query_nearby(user_id: int, lat: float, lon: float, radius_km: float, max_results: int = 200) -> List[sqlite3.Row]:
+def query_nearby(user_id: int, lat_user: float, lon_user: float, radius_km: float, max_results: int = 200) -> List[sqlite3.Row]:
     settings = get_user_settings(user_id)
     min_rating = settings.get("min_rating")
 
-    lat = _to_float(lat)
-    lon = _to_float(lon)
-    if lat is None or lon is None:
+    lat_user = _to_float(lat_user)
+    lon_user = _to_float(lon_user)
+    if lat_user is None or lon_user is None:
         return []
 
     with closing(get_conn()) as conn:
         cur = conn.cursor()
-        cur.execute(
-            "SELECT * FROM restaurants WHERE lat IS NOT NULL AND lon IS NOT NULL"
-        )
+        # NON filtriamo su IS NOT NULL perché spesso nel DB hai stringhe vuote non NULL
+        cur.execute("SELECT * FROM restaurants")
         rows = cur.fetchall()
 
+    valid_coords = 0
     results: List[Tuple[float, sqlite3.Row]] = []
-    for r in rows:
-        rlat = _to_float(r["lat"])
-        rlon = _to_float(r["lon"])
-        if rlat is None or rlon is None:
-            continue
 
+    for r in rows:
         if min_rating is not None and r["rating"] is not None and float(r["rating"]) < float(min_rating):
             continue
 
-        d = haversine_km(lat, lon, rlat, rlon)
+        lat, lon = _normalize_coords(r["lat"], r["lon"])
+        if lat is None or lon is None:
+            continue
+
+        valid_coords += 1
+        d = haversine_km(lat_user, lon_user, lat, lon)
         if d is not None and d <= radius_km:
             results.append((d, r))
+
+    # Debug console (Railway logs)
+    print(f"[nearby] radius={radius_km}km | rows={len(rows)} | valid_coords={valid_coords} | matches={len(results)}")
 
     results.sort(key=lambda x: x[0])
     return [x[1] for x in results[:max_results]]
@@ -427,13 +453,12 @@ def build_list_message(rows: List[sqlite3.Row], title: str, page: int) -> Tuple[
 
     for idx, r in enumerate(subset, start=1):
         rid = int(r["id"])
-        display_n = start + idx  # numero “globale”
+        display_n = start + idx
         rating_val = r["rating"]
         rating = f"{float(rating_val):.1f}⭐" if rating_val is not None else "n.d."
         lines.append(f"{display_n}. {r['name']} – {rating}")
         kb_rows.append([InlineKeyboardButton(f"Dettagli {display_n}", callback_data=f"details:{rid}")])
 
-    # nav
     nav = []
     if page > 0:
         nav.append(InlineKeyboardButton("⬅️", callback_data=f"listpage:{page-1}"))
@@ -471,13 +496,10 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     with closing(get_conn()) as conn:
         cur = conn.cursor()
-
         cur.execute("SELECT COUNT(DISTINCT user_id) AS n FROM usage_events")
         users = cur.fetchone()["n"] or 0
-
         cur.execute("SELECT COUNT(*) AS n FROM usage_events")
         events_total = cur.fetchone()["n"] or 0
-
         cur.execute(
             """
             SELECT event, COUNT(*) AS n
@@ -489,46 +511,12 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         events = cur.fetchall()
 
-        cur.execute(
-            """
-            SELECT city, COUNT(*) AS n
-            FROM usage_events
-            WHERE event='search_city' AND city IS NOT NULL AND city <> ''
-            GROUP BY city
-            ORDER BY n DESC
-            LIMIT 20
-            """
-        )
-        top_cities = cur.fetchall()
-
-        cur.execute(
-            """
-            SELECT restaurant_id, COUNT(*) AS n
-            FROM usage_events
-            WHERE event='details_click' AND restaurant_id IS NOT NULL
-            GROUP BY restaurant_id
-            ORDER BY n DESC
-            LIMIT 20
-            """
-        )
-        top_details = cur.fetchall()
-
-    def fmt(rows, key, val):
-        if not rows:
-            return "—"
-        return "\n".join([f"• {r[key]}: <b>{r[val]}</b>" for r in rows])
-
-    msg = (
-        "<b>📊 STATS (ADMIN)</b>\n\n"
-        f"👥 Utenti unici: <b>{users}</b>\n"
-        f"🧾 Eventi totali: <b>{events_total}</b>\n\n"
-        "<b>Top funzioni</b>\n"
-        f"{fmt(events, 'event', 'n')}\n\n"
-        "<b>Top città cercate</b>\n"
-        f"{fmt(top_cities, 'city', 'n')}\n\n"
-        "<b>Top click dettagli (restaurant_id)</b>\n"
-        f"{fmt(top_details, 'restaurant_id', 'n')}"
-    )
+    msg = "<b>📊 STATS (ADMIN)</b>\n\n"
+    msg += f"👥 Utenti unici: <b>{users}</b>\n"
+    msg += f"🧾 Eventi totali: <b>{events_total}</b>\n\n"
+    msg += "<b>Top funzioni</b>\n"
+    for e in events:
+        msg += f"• {e['event']}: <b>{e['n']}</b>\n"
 
     await update.message.reply_text(msg, parse_mode="HTML")
 
@@ -537,7 +525,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     text = (update.message.text or "").strip()
 
-    # --- Cerca città ---
     if text == "🔍 Cerca per città":
         context.user_data["awaiting_city"] = True
         await update.message.reply_text("Scrivi il nome della città (es: Bari):", reply_markup=main_keyboard())
@@ -571,13 +558,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Menu 👇", reply_markup=main_keyboard())
         return
 
-    # --- Vicino a me: scelta raggio ---
     if text == "📍 Vicino a me":
         context.user_data["awaiting_radius"] = True
-        await update.message.reply_text(
-            "Scegli il raggio di ricerca:",
-            reply_markup=radius_keyboard(),
-        )
+        await update.message.reply_text("Scegli il raggio di ricerca:", reply_markup=radius_keyboard())
         return
 
     if context.user_data.get("awaiting_radius"):
@@ -586,10 +569,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Ok, annullato.", reply_markup=main_keyboard())
             return
 
-        # atteso tipo "10 km"
-        if text.endswith("km") or text.endswith(" km"):
+        if "km" in text.lower():
             try:
-                radius = float(text.replace("km", "").replace(" ", "").strip())
+                radius = float(text.lower().replace("km", "").replace(" ", "").strip())
             except Exception:
                 radius = 5.0
 
@@ -606,47 +588,31 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        # se scrive altro
-        await update.message.reply_text("Seleziona una delle opzioni del raggio 👇", reply_markup=radius_keyboard())
+        await update.message.reply_text("Seleziona una delle opzioni 👇", reply_markup=radius_keyboard())
         return
 
-    # --- Preferiti ---
     if text == "⭐ I miei preferiti":
         favs = get_favorites(user.id)
         if not favs:
             await update.message.reply_text("Non hai ancora preferiti ⭐", reply_markup=main_keyboard())
             return
-
-        await update.message.reply_text(
-            f"Hai <b>{len(favs)}</b> preferiti:",
-            parse_mode="HTML",
-            reply_markup=main_keyboard(),
-        )
-
+        await update.message.reply_text(f"Hai <b>{len(favs)}</b> preferiti:", parse_mode="HTML", reply_markup=main_keyboard())
         for r in favs[:10]:
             detail = format_restaurant_detail(r)
-            kb = InlineKeyboardMarkup(
-                [[InlineKeyboardButton("📷 Aggiungi foto", callback_data=f"photo:{int(r['id'])}")]]
-            )
-            await update.message.reply_text(detail, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
+            await update.message.reply_text(detail, parse_mode="HTML", disable_web_page_preview=True)
         return
 
-    # --- Filtri ---
     if text == "⚙️ Filtri":
         settings = get_user_settings(user.id)
         min_rating = settings.get("min_rating")
         current = f"{min_rating:.1f}⭐" if min_rating is not None else "nessuno"
-
         kb = InlineKeyboardMarkup(
             [
-                [
-                    InlineKeyboardButton("≥ 4.0⭐", callback_data="filt:4.0"),
-                    InlineKeyboardButton("≥ 4.5⭐", callback_data="filt:4.5"),
-                ],
+                [InlineKeyboardButton("≥ 4.0⭐", callback_data="filt:4.0"),
+                 InlineKeyboardButton("≥ 4.5⭐", callback_data="filt:4.5")],
                 [InlineKeyboardButton("❌ Nessun filtro", callback_data="filt:none")],
             ]
         )
-
         await update.message.reply_text(
             f"Rating minimo attuale: <b>{current}</b>\nScegli:",
             parse_mode="HTML",
@@ -654,7 +620,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # --- Shop ---
     if text == "🛒 Shop":
         await update.message.reply_text(
             "🛒 <b>Shop Gluten Free</b>\n\n"
@@ -672,26 +637,26 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     loc = update.message.location
-    lat, lon = loc.latitude, loc.longitude
+    lat_user, lon_user = loc.latitude, loc.longitude
 
     radius = float(context.user_data.get("nearby_radius_km") or 5.0)
     log_usage(user.id, "search_nearby")
 
-    rows = query_nearby(user.id, lat, lon, radius_km=radius)
+    rows = query_nearby(user.id, lat_user, lon_user, radius_km=radius)
+
     if not rows:
         kb = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("📩 Suggerisci città", callback_data=f"suggest:posizione")]]
+            [[InlineKeyboardButton("📩 Suggerisci città/zona", callback_data="suggest:posizione")]]
         )
         await update.message.reply_text(
-            f"😔 Nessun locale trovato entro <b>{radius:g} km</b>.\n"
-            "Vuoi segnalarci la zona/città all’admin?",
+            f"😔 Nessun locale trovato entro <b>{radius:g} km</b>.\nVuoi segnalarci la zona all’admin?",
             parse_mode="HTML",
             reply_markup=kb,
         )
         await update.message.reply_text("Menu 👇", reply_markup=main_keyboard())
         return
 
-    context.user_data["last_nearby_coords"] = (lat, lon)
+    context.user_data["last_nearby_coords"] = (_to_float(lat_user), _to_float(lon_user))
     context.user_data["last_list_rows_ids"] = [int(r["id"]) for r in rows]
     context.user_data["last_list_title"] = f"📍 Locali entro <b>{radius:g} km</b> — trovati <b>{len(rows)}</b>"
     context.user_data["last_list_type"] = "nearby"
@@ -726,7 +691,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
 
-    # Dettagli
     if data.startswith("details:"):
         rid = int(data.split(":", 1)[1])
 
@@ -750,10 +714,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         kb = InlineKeyboardMarkup(
             [
-                [
-                    InlineKeyboardButton("⭐ Preferito", callback_data=f"fav:{rid}"),
-                    InlineKeyboardButton("⚠️ Segnala", callback_data=f"rep:{rid}"),
-                ],
+                [InlineKeyboardButton("⭐ Preferito", callback_data=f"fav:{rid}"),
+                 InlineKeyboardButton("⚠️ Segnala", callback_data=f"rep:{rid}")],
                 [InlineKeyboardButton("📷 Aggiungi foto", callback_data=f"photo:{rid}")],
             ]
         )
@@ -764,12 +726,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_photo(photos[0], caption="📷 Foto dalla community")
         return
 
-    # Pagination list (sia city che nearby)
     if data.startswith("listpage:"):
         page = int(data.split(":", 1)[1])
         ids = context.user_data.get("last_list_rows_ids") or []
         title = context.user_data.get("last_list_title") or "Risultati"
-
         if not ids:
             await query.message.reply_text("⚠️ Lista non disponibile, rifai la ricerca.", reply_markup=main_keyboard())
             return
@@ -780,7 +740,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             cur.execute(f"SELECT * FROM restaurants WHERE id IN ({placeholders})", ids)
             rows = cur.fetchall()
 
-        # mantenere l’ordine originale degli ids
         rows_by_id = {int(r["id"]): r for r in rows}
         ordered = [rows_by_id[i] for i in ids if i in rows_by_id]
 
@@ -788,28 +747,24 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(msg, parse_mode="HTML", reply_markup=kb)
         return
 
-    # Preferito
     if data.startswith("fav:"):
         rid = int(data.split(":", 1)[1])
         add_favorite(user.id, rid)
         await query.message.reply_text("⭐ Aggiunto ai preferiti.", reply_markup=main_keyboard())
         return
 
-    # Report
     if data.startswith("rep:"):
         rid = int(data.split(":", 1)[1])
         add_report(user.id, rid, "Segnalazione generica dal bot")
         await query.message.reply_text("⚠️ Segnalazione registrata. Grazie!", reply_markup=main_keyboard())
         return
 
-    # Photo attach
     if data.startswith("photo:"):
         rid = int(data.split(":", 1)[1])
         pending_photo_for_user[user.id] = rid
         await query.message.reply_text("📷 Inviami una foto del piatto/menù per questo locale.")
         return
 
-    # Filtri
     if data.startswith("filt:"):
         val = data.split(":", 1)[1]
         if val == "none":
@@ -820,7 +775,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text(f"Rating minimo impostato a {val}⭐.", reply_markup=main_keyboard())
         return
 
-    # Suggerisci città -> SOLO NOTIFICA ADMIN
     if data.startswith("suggest:"):
         payload = data.split(":", 1)[1].strip()
         log_usage(user.id, "suggest_city", city=payload)
@@ -838,13 +792,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
 
-# ==========================
-# MAIN
-# ==========================
-
 def build_application():
     ensure_schema()
-
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
@@ -852,7 +801,6 @@ def build_application():
 
     app.add_handler(MessageHandler(filters.LOCATION, handle_location))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
