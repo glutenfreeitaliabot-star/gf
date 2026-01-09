@@ -818,3 +818,6 @@ if __name__ == "__main__":
     application = build_application()
     print("🤖 GlutenFreeBot avviato...")
     application.run_polling()
+    
+    
+    
