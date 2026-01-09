@@ -1,1 +1,1 @@
-worker: python3 bot_glutenfree.py
+worker: ./.venv/bin/python bot_glutenfree.py
