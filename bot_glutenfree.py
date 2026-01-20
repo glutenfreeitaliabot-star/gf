@@ -494,239 +494,29 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not ADMIN_CHAT_ID or str(update.effective_user.id) != str(ADMIN_CHAT_ID):
         return
 
-    def fmt_dt(s: str) -> str:
-        # ISO string -> yyyy-mm-dd
-        try:
-            return s[:10]
-        except Exception:
-            return s
-
     with closing(get_conn()) as conn:
         cur = conn.cursor()
-
-        # ====== GENERALI ======
-        cur.execute("SELECT COUNT(DISTINCT user_id) AS n FROM usage_events WHERE user_id IS NOT NULL")
-        users_all = cur.fetchone()["n"] or 0
-
+        cur.execute("SELECT COUNT(DISTINCT user_id) AS n FROM usage_events")
+        users = cur.fetchone()["n"] or 0
         cur.execute("SELECT COUNT(*) AS n FROM usage_events")
         events_total = cur.fetchone()["n"] or 0
-
-        # Utenti attivi ultimi 7/30 giorni (UTC)
-        cur.execute("""
-            SELECT COUNT(DISTINCT user_id) AS n
-            FROM usage_events
-            WHERE user_id IS NOT NULL
-              AND datetime(created_at) >= datetime('now', '-7 days')
-        """)
-        users_7d = cur.fetchone()["n"] or 0
-
-        cur.execute("""
-            SELECT COUNT(DISTINCT user_id) AS n
-            FROM usage_events
-            WHERE user_id IS NOT NULL
-              AND datetime(created_at) >= datetime('now', '-30 days')
-        """)
-        users_30d = cur.fetchone()["n"] or 0
-
-        # ====== TOP FUNZIONI ======
-        cur.execute("""
+        cur.execute(
+            """
             SELECT event, COUNT(*) AS n
             FROM usage_events
             GROUP BY event
             ORDER BY n DESC
-            LIMIT 15
-        """)
-        top_events = cur.fetchall()
-
-        # ====== CITTA' CERCATE ======
-        # ATTENZIONE: qui consideriamo solo le ricerche città (event='search_city') e city NON NULL/VUOTA
-        cur.execute("""
-            SELECT LOWER(TRIM(city)) AS city_norm, COUNT(*) AS n
-            FROM usage_events
-            WHERE event = 'search_city'
-              AND city IS NOT NULL
-              AND TRIM(city) <> ''
-            GROUP BY city_norm
-            ORDER BY n DESC
-            LIMIT 30
-        """)
-        top_cities = cur.fetchall()
-
-        # ====== CITTA' "PROBLEMATICHE" (più cercate ma potenzialmente senza copertura) ======
-        # Stima: città cercate che NON esistono nella tabella restaurants (match case-insensitive)
-        cur.execute("""
-            SELECT t.city_norm, t.n
-            FROM (
-                SELECT LOWER(TRIM(city)) AS city_norm, COUNT(*) AS n
-                FROM usage_events
-                WHERE event = 'search_city'
-                  AND city IS NOT NULL
-                  AND TRIM(city) <> ''
-                GROUP BY city_norm
-            ) t
-            LEFT JOIN (
-                SELECT DISTINCT LOWER(TRIM(city)) AS city_norm
-                FROM restaurants
-                WHERE city IS NOT NULL AND TRIM(city) <> ''
-            ) r
-            ON t.city_norm = r.city_norm
-            WHERE r.city_norm IS NULL
-            ORDER BY t.n DESC
             LIMIT 20
-        """)
-        missing_cities = cur.fetchall()
-
-        # ====== DETTAGLI PIU' VISTI ======
-        cur.execute("""
-            SELECT restaurant_id, COUNT(*) AS n
-            FROM usage_events
-            WHERE event = 'details_click'
-              AND restaurant_id IS NOT NULL
-            GROUP BY restaurant_id
-            ORDER BY n DESC
-            LIMIT 10
-        """)
-        top_details = cur.fetchall()
-
-        # Risolvi i nomi ristorante per i top_details
-        top_detail_rows = []
-        if top_details:
-            ids = [str(int(r["restaurant_id"])) for r in top_details]
-            placeholders = ",".join(["?"] * len(ids))
-            cur.execute(f"SELECT id, name, city FROM restaurants WHERE id IN ({placeholders})", ids)
-            rr = cur.fetchall()
-            by_id = {int(x["id"]): x for x in rr}
-            for td in top_details:
-                rid = int(td["restaurant_id"])
-                info = by_id.get(rid)
-                if info:
-                    top_detail_rows.append((rid, td["n"], info["name"], info["city"]))
-                else:
-                    top_detail_rows.append((rid, td["n"], "?", "?"))
-
-        # ====== FAVORITES / REPORTS / PHOTOS ======
-        cur.execute("SELECT COUNT(*) AS n FROM favorites")
-        fav_total = cur.fetchone()["n"] or 0
-
-        cur.execute("""
-            SELECT COUNT(*) AS n
-            FROM favorites
-            WHERE datetime(created_at) >= datetime('now', '-30 days')
-        """)
-        fav_30d = cur.fetchone()["n"] or 0
-
-        cur.execute("SELECT COUNT(*) AS n FROM reports")
-        reports_total = cur.fetchone()["n"] or 0
-
-        cur.execute("""
-            SELECT status, COUNT(*) AS n
-            FROM reports
-            GROUP BY status
-            ORDER BY n DESC
-        """)
-        reports_by_status = cur.fetchall()
-
-        cur.execute("SELECT COUNT(*) AS n FROM photos")
-        photos_total = cur.fetchone()["n"] or 0
-
-        # ====== TREND GIORNALIERI (ultimi 14 giorni) ======
-        cur.execute("""
-            SELECT substr(created_at, 1, 10) AS day, COUNT(*) AS n
-            FROM usage_events
-            WHERE datetime(created_at) >= datetime('now', '-14 days')
-            GROUP BY day
-            ORDER BY day ASC
-        """)
-        events_daily = cur.fetchall()
-
-        # ====== FUNNEL GREZZO (ultimi 30 giorni) ======
-        # Conta utenti distinti che hanno fatto almeno un evento di quel tipo (non è sequenziale, ma è già utile)
-        cur.execute("""
-            SELECT
-              SUM(CASE WHEN event='start' THEN 1 ELSE 0 END) AS has_start,
-              SUM(CASE WHEN event IN ('search_city','search_nearby') THEN 1 ELSE 0 END) AS has_search,
-              SUM(CASE WHEN event='details_click' THEN 1 ELSE 0 END) AS has_details,
-              SUM(CASE WHEN event='suggest_city' THEN 1 ELSE 0 END) AS has_suggest
-            FROM (
-              SELECT user_id,
-                MAX(CASE WHEN event='start' THEN 1 ELSE 0 END) AS event_start,
-                MAX(CASE WHEN event IN ('search_city','search_nearby') THEN 1 ELSE 0 END) AS event_search,
-                MAX(CASE WHEN event='details_click' THEN 1 ELSE 0 END) AS event_details,
-                MAX(CASE WHEN event='suggest_city' THEN 1 ELSE 0 END) AS event_suggest,
-                MAX(CASE WHEN event='start' THEN 1 ELSE 0 END) AS start,
-                MAX(CASE WHEN event IN ('search_city','search_nearby') THEN 1 ELSE 0 END) AS search,
-                MAX(CASE WHEN event='details_click' THEN 1 ELSE 0 END) AS details,
-                MAX(CASE WHEN event='suggest_city' THEN 1 ELSE 0 END) AS suggest
-              FROM usage_events
-              WHERE user_id IS NOT NULL
-                AND datetime(created_at) >= datetime('now', '-30 days')
-              GROUP BY user_id
-            )
-        """)
-        funnel = cur.fetchone() or {}
+            """
+        )
+        events = cur.fetchall()
 
     msg = "<b>📊 STATS (ADMIN)</b>\n\n"
-    msg += f"👥 Utenti unici (all-time): <b>{users_all}</b>\n"
-    msg += f"🟢 Attivi ultimi 7 giorni: <b>{users_7d}</b>\n"
-    msg += f"🟡 Attivi ultimi 30 giorni: <b>{users_30d}</b>\n"
+    msg += f"👥 Utenti unici: <b>{users}</b>\n"
     msg += f"🧾 Eventi totali: <b>{events_total}</b>\n\n"
-
     msg += "<b>Top funzioni</b>\n"
-    for e in top_events:
+    for e in events:
         msg += f"• {e['event']}: <b>{e['n']}</b>\n"
-    msg += "\n"
-
-    msg += "<b>🏙️ Top città cercate</b>\n"
-    if top_cities:
-        for c in top_cities[:15]:
-            msg += f"• {c['city_norm']}: <b>{c['n']}</b>\n"
-    else:
-        msg += "—\n"
-    msg += "\n"
-
-    msg += "<b>⚠️ Città cercate ma NON presenti nel DB ristoranti</b>\n"
-    if missing_cities:
-        for c in missing_cities[:15]:
-            msg += f"• {c['city_norm']}: <b>{c['n']}</b>\n"
-    else:
-        msg += "—\n"
-    msg += "\n"
-
-    msg += "<b>🔥 Dettagli più aperti</b>\n"
-    if top_detail_rows:
-        for rid, n, name, city in top_detail_rows:
-            msg += f"• {name} ({city}) — <b>{n}</b>\n"
-    else:
-        msg += "—\n"
-    msg += "\n"
-
-    msg += "<b>⭐ Engagement</b>\n"
-    msg += f"• Preferiti totali: <b>{fav_total}</b> (ultimi 30g: <b>{fav_30d}</b>)\n"
-    msg += f"• Foto caricate: <b>{photos_total}</b>\n"
-    msg += f"• Segnalazioni totali: <b>{reports_total}</b>\n"
-    if reports_by_status:
-        msg += "  Stati segnalazioni:\n"
-        for r in reports_by_status:
-            msg += f"  • {r['status']}: <b>{r['n']}</b>\n"
-    msg += "\n"
-
-    # Funnel (utenti distinti ultimi 30g)
-    try:
-        msg += "<b>🧪 Funnel utenti (ultimi 30g, grezzo)</b>\n"
-        msg += f"• Start: <b>{funnel['has_start']}</b>\n"
-        msg += f"• Almeno 1 ricerca: <b>{funnel['has_search']}</b>\n"
-        msg += f"• Aprono dettagli: <b>{funnel['has_details']}</b>\n"
-        msg += f"• Suggeriscono città/zona: <b>{funnel['has_suggest']}</b>\n\n"
-    except Exception:
-        pass
-
-    msg += "<b>📈 Eventi giornalieri (ultimi 14g)</b>\n"
-    if events_daily:
-        # tienilo corto: ultimi 7 righe
-        for d in events_daily[-7:]:
-            msg += f"• {fmt_dt(d['day'])}: <b>{d['n']}</b>\n"
-    else:
-        msg += "—\n"
 
     await update.message.reply_text(msg, parse_mode="HTML")
 
