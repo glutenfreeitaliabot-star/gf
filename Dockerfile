@@ -9,4 +9,4 @@ COPY . .
 
 ENV PYTHONUNBUFFERED=1
 
-CMD ["bash", "-lc", "uvicorn webhook_app:app --host 0.0.0.0 --port ${PORT:-8080}"]
+CMD ["sh", "-c", "uvicorn webhook_app:app --host 0.0.0.0 --port ${PORT:-8080}"]
