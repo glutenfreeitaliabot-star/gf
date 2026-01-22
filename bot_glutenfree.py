@@ -127,6 +127,18 @@ def ensure_schema():
             )
             """
         )
+        # ==========================
+        # MIGRAZIONI (safe)
+        # ==========================
+        cur.execute("PRAGMA table_info(restaurants)")
+        cols = {row[1] for row in cur.fetchall()}  # row[1] = name colonna
+
+        # Aggiungi colonne se mancano (DB creato con versioni vecchie)
+        if "types" not in cols:
+            cur.execute("ALTER TABLE restaurants ADD COLUMN types TEXT")
+        if "phone" not in cols:
+            cur.execute("ALTER TABLE restaurants ADD COLUMN phone TEXT")
+
 
         conn.commit()
 
