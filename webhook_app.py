@@ -4,10 +4,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException
 from telegram import Update
 
-from bot_glutenfree import build_application
+from bot_glutenfree import build_application, ensure_schema
 from import_app_restaurants import import_app_restaurants
-
-# build marker: import-at-startup-enabled
 
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -24,6 +22,9 @@ application = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global application
+
+    # ✅ IMPORTANTISSIMO: sistema/crea lo schema PRIMA dell'import CSV
+    ensure_schema()
 
     # Debug: prova che il container vede il CSV giusto
     try:
