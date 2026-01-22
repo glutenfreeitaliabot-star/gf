@@ -5,6 +5,7 @@ from contextlib import closing
 from datetime import datetime
 from typing import Optional, List, Tuple
 
+
 from telegram import (
     Update,
     KeyboardButton,
@@ -22,6 +23,8 @@ from telegram.ext import (
 )
 
 from import_app_restaurants import import_app_restaurants
+from maps_utils import build_google_maps_multi_url
+
 
 # ==========================
 # CONFIG
@@ -451,7 +454,12 @@ def query_nearby(user_id: int, lat_user: float, lon_user: float, radius_km: floa
     return [x[1] for x in results[:max_results]]
 
 
-def build_list_message(rows: List[sqlite3.Row], title: str, page: int) -> Tuple[str, InlineKeyboardMarkup]:
+def build_list_message(
+    rows: List[sqlite3.Row],
+    title: str,
+    page: int,
+    user_location: Optional[Tuple[float, float]] = None,
+) -> Tuple[str, InlineKeyboardMarkup]:
     total = len(rows)
     total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
     page = max(0, min(page, total_pages - 1))
@@ -479,7 +487,19 @@ def build_list_message(rows: List[sqlite3.Row], title: str, page: int) -> Tuple[
     if nav:
         kb_rows.append(nav)
 
+    # 🗺 Mostra su mappa (Top 10) — usa TUTTA la lista, non solo la pagina
+    maps_url = build_google_maps_multi_url(
+        rows,
+        normalize_coords_fn=_normalize_coords,
+        user_location=user_location,
+        limit=10,
+        travelmode="driving",
+    )
+    if maps_url:
+        kb_rows.append([InlineKeyboardButton("🗺 Mostra su mappa (Top 10)", url=maps_url)])
+
     return "\n".join(lines), InlineKeyboardMarkup(kb_rows)
+
 
 
 # ==========================
@@ -565,7 +585,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["last_list_title"] = f"🔎 Ho trovato <b>{len(rows)}</b> locali a <b>{city}</b>"
         context.user_data["last_list_type"] = "city"
 
-        msg, kb = build_list_message(rows, context.user_data["last_list_title"], page=0)
+        msg, kb = build_list_message(rows, context.user_data["last_list_title"], page=0, user_location=None)
         await update.message.reply_text(msg, parse_mode="HTML", reply_markup=kb)
         await update.message.reply_text("Menu 👇", reply_markup=main_keyboard())
         return
@@ -673,7 +693,12 @@ async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["last_list_title"] = f"📍 Locali entro <b>{radius:g} km</b> — trovati <b>{len(rows)}</b>"
     context.user_data["last_list_type"] = "nearby"
 
-    msg, kb = build_list_message(rows, context.user_data["last_list_title"], page=0)
+    msg, kb = build_list_message(
+    rows,
+    context.user_data["last_list_title"],
+    page=0,
+    user_location=context.user_data.get("last_nearby_coords"),
+    )
     await update.message.reply_text(msg, parse_mode="HTML", reply_markup=kb)
     await update.message.reply_text("Menu 👇", reply_markup=main_keyboard())
 
@@ -755,7 +780,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rows_by_id = {int(r["id"]): r for r in rows}
         ordered = [rows_by_id[i] for i in ids if i in rows_by_id]
 
-        msg, kb = build_list_message(ordered, title, page=page)
+        user_loc = None
+        if context.user_data.get("last_list_type") == "nearby":
+            user_loc = context.user_data.get("last_nearby_coords")
+            
+        msg, kb = build_list_message(ordered, title, page=page, user_location=user_loc)
         await query.edit_message_text(msg, parse_mode="HTML", reply_markup=kb)
         return
 
