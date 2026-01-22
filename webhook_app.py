@@ -7,6 +7,8 @@ from telegram import Update
 from bot_glutenfree import build_application
 from import_app_restaurants import import_app_restaurants
 
+# build marker: import-at-startup-enabled
+
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
