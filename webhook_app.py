@@ -58,6 +58,47 @@ app = FastAPI(lifespan=lifespan)
 async def health():
     return {"ok": True, "service": "GlutenFreeBot webhook"}
 
+@app.get("/debug/stats")
+async def debug_stats():
+    import os, sqlite3, csv
+
+    # CSV stats
+    csv_path = "app_restaurants.csv"
+    csv_rows = None
+    csv_size = None
+    csv_mtime = None
+    csv_error = None
+    try:
+        st = os.stat(csv_path)
+        csv_size = st.st_size
+        csv_mtime = st.st_mtime
+        with open(csv_path, "r", encoding="utf-8", newline="") as f:
+            r = csv.reader(f)
+            csv_rows = sum(1 for _ in r) - 1  # - header
+    except Exception as e:
+        csv_error = str(e)
+
+    # DB stats
+    db_path = "restaurants.db"
+    db_total = None
+    db_app = None
+    db_error = None
+    try:
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM restaurants")
+        db_total = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM restaurants WHERE source='app'")
+        db_app = cur.fetchone()[0]
+        conn.close()
+    except Exception as e:
+        db_error = str(e)
+
+    return {
+        "csv": {"path": csv_path, "rows": csv_rows, "size": csv_size, "mtime": csv_mtime, "error": csv_error},
+        "db": {"path": db_path, "restaurants_total": db_total, "restaurants_source_app": db_app, "error": db_error},
+    }
+
 
 @app.post("/webhook/{secret}")
 async def telegram_webhook(secret: str, request: Request):
