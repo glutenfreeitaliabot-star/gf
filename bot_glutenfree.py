@@ -66,6 +66,7 @@ def ensure_schema():
                 lat TEXT,
                 lon TEXT,
                 rating REAL,
+                rating_online_gf REAL,
                 last_update TEXT,
                 types TEXT,
                 phone TEXT
@@ -131,17 +132,17 @@ def ensure_schema():
             """
         )
         # ==========================
-        # MIGRAZIONI (safe)
+        # MIGRAZIONI SAFE (DB già esistenti)
         # ==========================
         cur.execute("PRAGMA table_info(restaurants)")
-        cols = {row[1] for row in cur.fetchall()}  # row[1] = name colonna
+        cols = {row[1] for row in cur.fetchall()}  # row[1] = nome colonna
 
-        # Aggiungi colonne se mancano (DB creato con versioni vecchie)
         if "types" not in cols:
             cur.execute("ALTER TABLE restaurants ADD COLUMN types TEXT")
         if "phone" not in cols:
             cur.execute("ALTER TABLE restaurants ADD COLUMN phone TEXT")
-
+        if "rating_online_gf" not in cols:
+            cur.execute("ALTER TABLE restaurants ADD COLUMN rating_online_gf REAL")
 
         conn.commit()
 

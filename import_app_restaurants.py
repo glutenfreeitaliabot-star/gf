@@ -9,8 +9,7 @@ CSV_PATH = "app_restaurants.csv"
 
 
 def get_conn():
-    conn = sqlite3.connect(DB_PATH)
-    return conn
+    return sqlite3.connect(DB_PATH)
 
 
 def _to_float(v):
@@ -29,7 +28,6 @@ def _to_float(v):
 
 
 def _pick(row: dict, *keys):
-    """Prende il primo valore non vuoto tra chiavi alternative."""
     for k in keys:
         if k in row and row[k] is not None:
             val = str(row[k]).strip()
@@ -39,8 +37,7 @@ def _pick(row: dict, *keys):
 
 
 def _pick_float(row: dict, *keys):
-    v = _pick(row, *keys)
-    return _to_float(v)
+    return _to_float(_pick(row, *keys))
 
 
 def import_app_restaurants():
@@ -52,7 +49,7 @@ def import_app_restaurants():
     with closing(get_conn()) as conn:
         cur = conn.cursor()
 
-        # assicura tabella (se il bot non è partito prima)
+        # === CREATE TABLE (DB nuovi) ===
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS restaurants (
@@ -65,6 +62,7 @@ def import_app_restaurants():
                 lat TEXT,
                 lon TEXT,
                 rating REAL,
+                rating_online_gf REAL,
                 last_update TEXT,
                 types TEXT,
                 phone TEXT
@@ -83,55 +81,54 @@ def import_app_restaurants():
 
         with open(CSV_PATH, "r", encoding="utf-8-sig", newline="") as f:
             reader = csv.DictReader(f)
-            # normalizzo header: lower-case
-            fieldnames = [h.strip() for h in (reader.fieldnames or [])]
-            if not fieldnames:
-                raise ValueError("CSV senza header (prima riga).")
 
-            # Re-wrap reader per avere chiavi originali ma gestiamo con _pick che prova più varianti
+            if not reader.fieldnames:
+                raise ValueError("CSV senza header.")
+
             for row in reader:
-                # name/city obbligatori
-                name = _pick(row, "name", "Name", "nome", "Nome")
-                city = _pick(row, "city", "City", "città", "Città")
+                name = _pick(row, "name")
+                city = _pick(row, "city")
 
                 if not name or not city:
                     continue
 
-                address = _pick(row, "address", "Address", "indirizzo", "Indirizzo")
-                notes = _pick(row, "notes", "Notes", "note", "Note")
-                types = _pick(row, "types", "Types", "type", "Type", "tipologia", "Tipologia")
+                address = _pick(row, "address")
+                notes = _pick(row, "notes")
+                types = _pick(row, "types")
+                phone = _pick(row, "phone")
 
-                phone = _pick(row, "phone", "Phone", "telefono", "Telefono")
+                lat = _pick_float(row, "lat")
+                lon = _pick_float(row, "lon")
 
-                lat = _pick_float(row, "lat", "Lat", "latitude", "Latitude")
-                lon = _pick_float(row, "lon", "Lon", "lng", "Lng", "longitude", "Longitude")
-
-                # rating (può essere vuoto)
-                rating_raw = _pick(row, "rating", "Rating", "stars", "Stars")
-                rating = None
-                if rating_raw:
-                    try:
-                        rating = float(str(rating_raw).strip().replace(",", "."))
-                    except Exception:
-                        rating = None
+                rating = _to_float(_pick(row, "rating"))
+                rating_online_gf = _to_float(_pick(row, "rating_online_gf"))
 
                 if lat is not None and lon is not None:
                     coords_ok += 1
 
-                # Salvo lat/lon come TEXT (coerente col bot), ma solo se validi
                 lat_db = str(lat) if lat is not None else None
                 lon_db = str(lon) if lon is not None else None
 
                 cur.execute(
                     """
-                    INSERT INTO restaurants
-                    (name, city, address, notes, source, lat, lon, rating, last_update, types, phone)
-                    VALUES (?, ?, ?, ?, 'app', ?, ?, ?, ?, ?, ?)
+                    INSERT INTO restaurants (
+                        name, city, address, notes, source,
+                        lat, lon,
+                        rating, rating_online_gf,
+                        last_update, types, phone
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (name, city, address, notes, lat_db, lon_db, rating, now, types, phone),
+                    (
+                        name, city, address, notes, "app",
+                        lat_db, lon_db,
+                        rating, rating_online_gf,
+                        now, types, phone,
+                    ),
                 )
+
                 inserted += 1
 
         conn.commit()
-        print(f"✅ Import completato. Ristoranti 'app' inseriti: {inserted}")
+        print(f"✅ Import completato. Ristoranti inseriti: {inserted}")
         print(f"📍 Coordinate valide trovate: {coords_ok}")
