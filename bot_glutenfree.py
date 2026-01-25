@@ -40,6 +40,18 @@ pending_photo_for_user = {}
 RADIUS_OPTIONS = [1, 3, 5, 10, 15, 20]
 
 
+def format_active_filters(settings: dict) -> str:
+    parts = []
+    mr = settings.get("min_rating")
+    tf = settings.get("type_filter")
+    if mr is not None:
+        parts.append(f"rating ≥ {float(mr):.1f}⭐")
+    if tf:
+        parts.append(f"tipo: {tf}")
+    return ", ".join(parts) if parts else "nessuno"
+
+
+
 # ==========================
 # DB
 # ==========================
@@ -178,6 +190,25 @@ def get_user_settings(user_id: int):
             "min_rating": row["min_rating"] if row else None,
             "type_filter": row["type_filter"] if row else None,
 }
+
+
+def set_user_min_rating(user_id: int, value: Optional[float]):
+    with closing(get_conn()) as conn:
+        cur = conn.cursor()
+        # Mantieni eventuale type_filter: non cancellare la riga
+        cur.execute(
+            """
+            INSERT INTO user_settings (user_id, min_rating)
+            VALUES (?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET min_rating = excluded.min_rating
+            """,
+            (user_id, value),
+        )
+        # Se value è None, settiamo min_rating a NULL (non delete)
+        if value is None:
+            cur.execute("UPDATE user_settings SET min_rating = NULL WHERE user_id = ?", (user_id,))
+        conn.commit()
+
 
 
 
@@ -617,7 +648,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         context.user_data["last_list_rows_ids"] = [int(r["id"]) for r in rows]
-        context.user_data["last_list_title"] = f"🔎 Ho trovato <b>{len(rows)}</b> locali a <b>{city}</b>"
+        context.user_data["last_list_title"] = f"🔎 Ho trovato <b>{len(rows)}</b> locali a <b>{city}</b>\n🔎 Filtri: <b>{format_active_filters(get_user_settings(user.id))}</b>"
         context.user_data["last_list_type"] = "city"
 
         msg, kb = build_list_message(rows, context.user_data["last_list_title"], page=0, user_location=None)
@@ -674,35 +705,44 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         min_rating = settings.get("min_rating")
         type_filter = settings.get("type_filter")
 
-        current_rating = f"{min_rating:.1f}⭐" if min_rating is not None else "nessuno"
-        current_type = type_filter if type_filter else "tutti"
+        current_rating = f"≥ {min_rating:.1f}⭐" if min_rating is not None else "nessuno"
+        current_type = (type_filter or "tutti")
+
+        # Etichette con spunta per capire cosa è attivo
+        b40 = "✅ ≥ 4.0⭐" if min_rating == 4.0 else "≥ 4.0⭐"
+        b45 = "✅ ≥ 4.5⭐" if min_rating == 4.5 else "≥ 4.5⭐"
+        br_off = "✅ Rating: nessuno" if min_rating is None else "❌ Rating: nessuno"
+
+        def tbtn(label, val):
+            return ("✅ " + label) if (type_filter == val) else label
 
         kb = InlineKeyboardMarkup(
             [
-                [InlineKeyboardButton("≥ 4.0⭐", callback_data="filt:4.0"),
-                 InlineKeyboardButton("≥ 4.5⭐", callback_data="filt:4.5")],
-                [InlineKeyboardButton("❌ Rating: nessuno", callback_data="filt:none")],
+                [InlineKeyboardButton(b40, callback_data="filt:4.0"),
+                 InlineKeyboardButton(b45, callback_data="filt:4.5")],
+                [InlineKeyboardButton(br_off, callback_data="filt:none")],
 
-                [InlineKeyboardButton("🍽 Ristorante", callback_data="type:restaurant"),
-                 InlineKeyboardButton("☕ Cafe", callback_data="type:cafe")],
-                [InlineKeyboardButton("🥐 Bakery", callback_data="type:bakery"),
-                 InlineKeyboardButton("🍺 Bar", callback_data="type:bar")],
-                [InlineKeyboardButton("🛒 Supermercato", callback_data="type:grocery_or_supermarket")],
-                [InlineKeyboardButton("❌ Tipologia: tutte", callback_data="type:none")],
+                [InlineKeyboardButton(tbtn("🍽 Ristorante", "restaurant"), callback_data="type:restaurant"),
+                 InlineKeyboardButton(tbtn("☕ Cafe", "cafe"), callback_data="type:cafe")],
+                [InlineKeyboardButton(tbtn("🥐 Bakery", "bakery"), callback_data="type:bakery"),
+                 InlineKeyboardButton(tbtn("🍺 Bar", "bar"), callback_data="type:bar")],
+                [InlineKeyboardButton(tbtn("🛒 Supermercato", "grocery_or_supermarket"), callback_data="type:grocery_or_supermarket")],
+                [InlineKeyboardButton("✅ Tipologia: tutte" if type_filter is None else "❌ Tipologia: tutte", callback_data="type:none")],
+
+                [InlineKeyboardButton("🧹 Reset filtri", callback_data="reset:filters")],
             ]
-    )
+        )
 
-    await update.message.reply_text(
-        f"Rating minimo attuale: <b>{current_rating}</b>\n"
-        f"Tipologia attuale: <b>{current_type}</b>\n\n"
-        f"Scegli:",
-        parse_mode="HTML",
-        reply_markup=kb,
-    )
-    return
-
-
-
+        await update.message.reply_text(
+            "⚙️ <b>Filtri attivi</b>\n"
+            f"• Rating: <b>{current_rating}</b>\n"
+            f"• Tipologia: <b>{current_type}</b>\n\n"
+            "Suggerimento: se i risultati ti sembrano pochi, probabilmente hai un filtro attivo.\n"
+            "Usa “🧹 Reset filtri” per tornare a vedere tutto.",
+            parse_mode="HTML",
+            reply_markup=kb,
+        )
+        return
     if text == "🛒 Shop":
         await update.message.reply_text(
             "🛒 <b>Shop Gluten Free</b>\n\n"
@@ -741,7 +781,7 @@ async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data["last_nearby_coords"] = (_to_float(lat_user), _to_float(lon_user))
     context.user_data["last_list_rows_ids"] = [int(r["id"]) for r in rows]
-    context.user_data["last_list_title"] = f"📍 Locali entro <b>{radius:g} km</b> — trovati <b>{len(rows)}</b>"
+    context.user_data["last_list_title"] = f"📍 Locali entro <b>{radius:g} km</b> — trovati <b>{len(rows)}</b>\n🔎 Filtri: <b>{format_active_filters(get_user_settings(user.id))}</b>"
     context.user_data["last_list_type"] = "nearby"
 
     msg, kb = build_list_message(
@@ -861,10 +901,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         val = data.split(":", 1)[1]
         if val == "none":
             set_user_min_rating(user.id, None)
-            await query.message.reply_text("Filtro rating disattivato.", reply_markup=main_keyboard())
+            await query.message.reply_text(f"Filtro rating disattivato.\n🔎 Filtri attivi: <b>{format_active_filters(get_user_settings(user.id))}</b>", parse_mode="HTML", reply_markup=main_keyboard())
         else:
             set_user_min_rating(user.id, float(val))
-            await query.message.reply_text(f"Rating minimo impostato a {val}⭐.", reply_markup=main_keyboard())
+            await query.message.reply_text(f"Rating minimo impostato a {val}⭐.\n🔎 Filtri attivi: <b>{format_active_filters(get_user_settings(user.id))}</b>", parse_mode="HTML", reply_markup=main_keyboard())
         return
         
     if data.startswith("type:"):
@@ -878,10 +918,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         else:
             set_user_type_filter(user.id, val)
-            await query.message.reply_text(
-                f"Tipologia impostata: {val}",
-                reply_markup=main_keyboard()
-            )
+            await query.message.reply_text(f"Tipologia impostata: {val}\n🔎 Filtri attivi: <b>{format_active_filters(get_user_settings(user.id))}</b>", parse_mode="HTML", reply_markup=main_keyboard())
         return
 
 
