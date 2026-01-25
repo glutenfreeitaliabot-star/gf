@@ -89,7 +89,8 @@ def ensure_schema():
             """
             CREATE TABLE IF NOT EXISTS user_settings (
                 user_id INTEGER PRIMARY KEY,
-                min_rating REAL
+                min_rating REAL,
+                type_filter TEXT
             )
             """
         )
@@ -144,6 +145,14 @@ def ensure_schema():
         if "rating_online_gf" not in cols:
             cur.execute("ALTER TABLE restaurants ADD COLUMN rating_online_gf REAL")
 
+        # user_settings migrations
+        cur.execute("PRAGMA table_info(user_settings)")
+        us_cols = {row[1] for row in cur.fetchall()}
+        if "min_rating" not in us_cols:
+            cur.execute("ALTER TABLE user_settings ADD COLUMN min_rating REAL")
+        if "type_filter" not in us_cols:
+            cur.execute("ALTER TABLE user_settings ADD COLUMN type_filter TEXT")
+
         conn.commit()
 
 
@@ -163,26 +172,31 @@ def log_usage(user_id: int, event: str, city: Optional[str] = None, restaurant_i
 def get_user_settings(user_id: int):
     with closing(get_conn()) as conn:
         cur = conn.cursor()
-        cur.execute("SELECT min_rating FROM user_settings WHERE user_id = ?", (user_id,))
+        cur.execute("SELECT min_rating, type_filter FROM user_settings WHERE user_id = ?", (user_id,))
         row = cur.fetchone()
-        return {"min_rating": row["min_rating"] if row else None}
+        return {
+            "min_rating": row["min_rating"] if row else None,
+            "type_filter": row["type_filter"] if row else None,
+}
 
 
-def set_user_min_rating(user_id: int, value: Optional[float]):
+
+def set_user_type_filter(user_id: int, value: Optional[str]):
     with closing(get_conn()) as conn:
         cur = conn.cursor()
         if value is None:
-            cur.execute("DELETE FROM user_settings WHERE user_id = ?", (user_id,))
+            cur.execute("UPDATE user_settings SET type_filter = NULL WHERE user_id = ?", (user_id,))
         else:
             cur.execute(
                 """
-                INSERT INTO user_settings (user_id, min_rating)
+                INSERT INTO user_settings (user_id, type_filter)
                 VALUES (?, ?)
-                ON CONFLICT(user_id) DO UPDATE SET min_rating = excluded.min_rating
+                ON CONFLICT(user_id) DO UPDATE SET type_filter = excluded.type_filter
                 """,
                 (user_id, value),
             )
         conn.commit()
+
 
 
 def add_favorite(user_id: int, restaurant_id: int):
@@ -353,10 +367,12 @@ def format_restaurant_detail(r: sqlite3.Row, user_location: Optional[Tuple[float
     address = r["address"] or "Indirizzo non disponibile"
     notes = r["notes"] or "—"
     rating_val = r["rating"]
+    rating_gf_val = r["rating_online_gf"] if "rating_online_gf" in r.keys() else None
     last_update = r["last_update"]
     phone = (r["phone"] or "").strip() if "phone" in r.keys() and r["phone"] else ""
 
     rating = f"{float(rating_val):.1f}⭐" if rating_val is not None else "n.d."
+    rating_gf = f"{float(rating_gf_val):.1f}🌾" if rating_gf_val is not None else "n.d."
     update_str = f" (aggiornato: {last_update})" if last_update else ""
 
     lat, lon = _normalize_coords(r["lat"], r["lon"])
@@ -378,6 +394,7 @@ def format_restaurant_detail(r: sqlite3.Row, user_location: Optional[Tuple[float
         f"🍽 <b>{name}</b>\n"
         f"📍 <b>{city}</b> – {address}\n"
         f"⭐ Rating Google: {rating}{update_str}"
+        f"🌾 Rating dove citano Gluten Free: <b>{rating_gf}</b>"
         f"{distance_str}"
         f"{phone_line}\n\n"
         f"<b>Note:</b> {notes}\n\n"
@@ -397,6 +414,7 @@ def format_restaurant_detail(r: sqlite3.Row, user_location: Optional[Tuple[float
 def query_by_city(city: str, user_id: int) -> List[sqlite3.Row]:
     settings = get_user_settings(user_id)
     min_rating = settings.get("min_rating")
+    type_filter = settings.get("type_filter")
 
     with closing(get_conn()) as conn:
         cur = conn.cursor()
@@ -414,12 +432,21 @@ def query_by_city(city: str, user_id: int) -> List[sqlite3.Row]:
     if min_rating is not None:
         rows = [r for r in rows if (r["rating"] is None or float(r["rating"]) >= float(min_rating))]
 
+    if type_filter:
+        tf = str(type_filter).strip().lower()
+        rows = [
+            r for r in rows
+            if (r["types"] and tf in {t.strip().lower() for t in str(r["types"]).split("|")})
+        ]
+
     return rows
+
 
 
 def query_nearby(user_id: int, lat_user: float, lon_user: float, radius_km: float, max_results: int = 200) -> List[sqlite3.Row]:
     settings = get_user_settings(user_id)
     min_rating = settings.get("min_rating")
+    type_filter = settings.get("type_filter")
 
     lat_user = _to_float(lat_user)
     lon_user = _to_float(lon_user)
@@ -438,6 +465,11 @@ def query_nearby(user_id: int, lat_user: float, lon_user: float, radius_km: floa
     for r in rows:
         if min_rating is not None and r["rating"] is not None and float(r["rating"]) < float(min_rating):
             continue
+
+        if type_filter:
+            tf = str(type_filter).strip().lower()
+            if not (r["types"] and tf in {t.strip().lower() for t in str(r["types"]).split("|")}):
+                continue
 
         lat, lon = _normalize_coords(r["lat"], r["lon"])
         if lat is None or lon is None:
@@ -476,8 +508,10 @@ def build_list_message(
         rid = int(r["id"])
         display_n = start + idx
         rating_val = r["rating"]
+        rating_gf_val = r["rating_online_gf"] if "rating_online_gf" in r.keys() else None
         rating = f"{float(rating_val):.1f}⭐" if rating_val is not None else "n.d."
-        lines.append(f"{display_n}. {r['name']} – {rating}")
+        rating_gf = f"{float(rating_gf_val):.1f}🌾" if rating_gf_val is not None else "n.d."
+        lines.append(f"{display_n}. {r['name']} – {rating} | {rating_gf}")
         kb_rows.append([InlineKeyboardButton(f"Dettagli {display_n}", callback_data=f"details:{rid}")])
 
     nav = []
@@ -638,20 +672,36 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == "⚙️ Filtri":
         settings = get_user_settings(user.id)
         min_rating = settings.get("min_rating")
-        current = f"{min_rating:.1f}⭐" if min_rating is not None else "nessuno"
+        type_filter = settings.get("type_filter")
+
+        current_rating = f"{min_rating:.1f}⭐" if min_rating is not None else "nessuno"
+        current_type = type_filter if type_filter else "tutti"
+
         kb = InlineKeyboardMarkup(
             [
                 [InlineKeyboardButton("≥ 4.0⭐", callback_data="filt:4.0"),
                  InlineKeyboardButton("≥ 4.5⭐", callback_data="filt:4.5")],
-                [InlineKeyboardButton("❌ Nessun filtro", callback_data="filt:none")],
+                [InlineKeyboardButton("❌ Rating: nessuno", callback_data="filt:none")],
+
+                [InlineKeyboardButton("🍽 Ristorante", callback_data="type:restaurant"),
+                 InlineKeyboardButton("☕ Cafe", callback_data="type:cafe")],
+                [InlineKeyboardButton("🥐 Bakery", callback_data="type:bakery"),
+                 InlineKeyboardButton("🍺 Bar", callback_data="type:bar")],
+                [InlineKeyboardButton("🛒 Supermercato", callback_data="type:grocery_or_supermarket")],
+                [InlineKeyboardButton("❌ Tipologia: tutte", callback_data="type:none")],
             ]
-        )
-        await update.message.reply_text(
-            f"Rating minimo attuale: <b>{current}</b>\nScegli:",
-            parse_mode="HTML",
-            reply_markup=kb,
-        )
-        return
+    )
+
+    await update.message.reply_text(
+        f"Rating minimo attuale: <b>{current_rating}</b>\n"
+        f"Tipologia attuale: <b>{current_type}</b>\n\n"
+        f"Scegli:",
+        parse_mode="HTML",
+        reply_markup=kb,
+    )
+    return
+
+
 
     if text == "🛒 Shop":
         await update.message.reply_text(
@@ -816,6 +866,24 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             set_user_min_rating(user.id, float(val))
             await query.message.reply_text(f"Rating minimo impostato a {val}⭐.", reply_markup=main_keyboard())
         return
+        
+    if data.startswith("type:"):
+        val = data.split(":", 1)[1]
+
+        if val == "none":
+            set_user_type_filter(user.id, None)
+            await query.message.reply_text(
+                "Filtro tipologia disattivato.",
+                reply_markup=main_keyboard()
+            )
+        else:
+            set_user_type_filter(user.id, val)
+            await query.message.reply_text(
+                f"Tipologia impostata: {val}",
+                reply_markup=main_keyboard()
+            )
+        return
+
 
     if data.startswith("suggest:"):
         payload = data.split(":", 1)[1].strip()
