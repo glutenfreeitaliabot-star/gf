@@ -2,7 +2,7 @@ import math
 import os
 import sqlite3
 from contextlib import closing
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, List, Tuple
 
 
@@ -165,6 +165,22 @@ def ensure_schema():
         if "type_filter" not in us_cols:
             cur.execute("ALTER TABLE user_settings ADD COLUMN type_filter TEXT")
 
+
+        # Coda segnalazioni utenti (nuovi ristoranti)
+        cur.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS restaurant_suggestions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                name TEXT NOT NULL,
+                city TEXT NOT NULL,
+                suggestion_type TEXT,
+                notes TEXT,
+                created_at TEXT NOT NULL
+            )
+            '''
+        )
+
         conn.commit()
 
 
@@ -178,6 +194,22 @@ def log_usage(user_id: int, event: str, city: Optional[str] = None, restaurant_i
             """,
             (user_id, event, city, restaurant_id, datetime.utcnow().isoformat()),
         )
+
+        # Coda segnalazioni utenti (nuovi ristoranti)
+        cur.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS restaurant_suggestions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                name TEXT NOT NULL,
+                city TEXT NOT NULL,
+                suggestion_type TEXT,
+                notes TEXT,
+                created_at TEXT NOT NULL
+            )
+            '''
+        )
+
         conn.commit()
 
 
@@ -207,6 +239,22 @@ def set_user_min_rating(user_id: int, value: Optional[float]):
         # Se value è None, settiamo min_rating a NULL (non delete)
         if value is None:
             cur.execute("UPDATE user_settings SET min_rating = NULL WHERE user_id = ?", (user_id,))
+
+        # Coda segnalazioni utenti (nuovi ristoranti)
+        cur.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS restaurant_suggestions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                name TEXT NOT NULL,
+                city TEXT NOT NULL,
+                suggestion_type TEXT,
+                notes TEXT,
+                created_at TEXT NOT NULL
+            )
+            '''
+        )
+
         conn.commit()
 
 
@@ -226,6 +274,22 @@ def set_user_type_filter(user_id: int, value: Optional[str]):
                 """,
                 (user_id, value),
             )
+
+        # Coda segnalazioni utenti (nuovi ristoranti)
+        cur.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS restaurant_suggestions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                name TEXT NOT NULL,
+                city TEXT NOT NULL,
+                suggestion_type TEXT,
+                notes TEXT,
+                created_at TEXT NOT NULL
+            )
+            '''
+        )
+
         conn.commit()
 
 
@@ -240,6 +304,22 @@ def add_favorite(user_id: int, restaurant_id: int):
             """,
             (user_id, restaurant_id, datetime.utcnow().isoformat()),
         )
+
+        # Coda segnalazioni utenti (nuovi ristoranti)
+        cur.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS restaurant_suggestions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                name TEXT NOT NULL,
+                city TEXT NOT NULL,
+                suggestion_type TEXT,
+                notes TEXT,
+                created_at TEXT NOT NULL
+            )
+            '''
+        )
+
         conn.commit()
 
 
@@ -269,6 +349,22 @@ def add_report(user_id: int, restaurant_id: int, reason: str):
             """,
             (user_id, restaurant_id, reason, datetime.utcnow().isoformat()),
         )
+
+        # Coda segnalazioni utenti (nuovi ristoranti)
+        cur.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS restaurant_suggestions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                name TEXT NOT NULL,
+                city TEXT NOT NULL,
+                suggestion_type TEXT,
+                notes TEXT,
+                created_at TEXT NOT NULL
+            )
+            '''
+        )
+
         conn.commit()
 
 
@@ -282,6 +378,22 @@ def add_photo_record(user_id: int, restaurant_id: int, file_id: str):
             """,
             (restaurant_id, file_id, user_id, datetime.utcnow().isoformat()),
         )
+
+        # Coda segnalazioni utenti (nuovi ristoranti)
+        cur.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS restaurant_suggestions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                name TEXT NOT NULL,
+                city TEXT NOT NULL,
+                suggestion_type TEXT,
+                notes TEXT,
+                created_at TEXT NOT NULL
+            )
+            '''
+        )
+
         conn.commit()
 
 
@@ -368,7 +480,7 @@ def main_keyboard():
         [
             ["🔍 Cerca per città", "📍 Vicino a me"],
             ["⭐ I miei preferiti", "⚙️ Filtri"],
-            ["🛒 Shop"],
+            ["➕ Segnala ristorante", "🛒 Shop"],
         ],
         resize_keyboard=True,
     )
@@ -566,6 +678,125 @@ def build_list_message(
 
     return "\n".join(lines), InlineKeyboardMarkup(kb_rows)
 
+
+
+
+
+# ===============================
+# COMMUNITY: SEGNALAZIONI + FEEDBACK
+# ===============================
+
+from telegram.ext import ConversationHandler
+
+SEGNALA_NOME, SEGNALA_CITTA, SEGNALA_TIPO, SEGNALA_NOTE = range(4)
+
+def save_suggestion(user_id: int, name: str, city: str, suggestion_type: str, notes: str):
+    with closing(get_conn()) as conn:
+        cur = conn.cursor()
+        cur.execute(
+            '''
+            INSERT INTO restaurant_suggestions (user_id, name, city, suggestion_type, notes, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ''',
+            (user_id, name, city, suggestion_type, notes, datetime.utcnow().isoformat()),
+        )
+        conn.commit()
+
+def feedback_buttons(rid: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("✅ Ho prenotato", callback_data=f"book:{rid}"),
+                InlineKeyboardButton("❌ Non utile", callback_data=f"notuse:{rid}"),
+            ]
+        ]
+    )
+
+def followup_rating_buttons(rid: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("⭐ Sicuro e consigliato", callback_data=f"rategood:{rid}")],
+            [InlineKeyboardButton("⚠️ Attenzione contaminazione", callback_data=f"ratewarn:{rid}")],
+            [InlineKeyboardButton("❌ Esperienza negativa", callback_data=f"ratebad:{rid}")],
+        ]
+    )
+
+async def segnala_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    log_usage(user.id, "suggest_start")
+    context.user_data.pop("suggest_data", None)
+    await update.message.reply_text("➕ Segnalazione nuovo ristorante\n\nScrivi il *nome* del locale:", parse_mode="Markdown")
+    return SEGNALA_NOME
+
+async def segnala_nome(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["suggest_data"] = {"name": update.message.text.strip()}
+    await update.message.reply_text("Perfetto. Ora scrivi la *città*:", parse_mode="Markdown")
+    return SEGNALA_CITTA
+
+async def segnala_citta(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["suggest_data"]["city"] = update.message.text.strip()
+    kb = InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("100% GF", callback_data="stype:100")],
+            [InlineKeyboardButton("Opzioni GF", callback_data="stype:options")],
+            [InlineKeyboardButton("Non sicuro / da verificare", callback_data="stype:unknown")],
+        ]
+    )
+    await update.message.reply_text("Che tipo di locale è?", reply_markup=kb)
+    return SEGNALA_TIPO
+
+async def segnala_tipo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    stype = (q.data or "").split(":", 1)[1] if ":" in (q.data or "") else "unknown"
+    context.user_data["suggest_data"]["type"] = stype
+    await q.edit_message_text("Ultimo step: scrivi una nota (indirizzo, link, cosa hai mangiato, ecc.).\nSe non vuoi, scrivi 'skip'.")
+    return SEGNALA_NOTE
+
+async def segnala_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    notes = update.message.text.strip()
+    if notes.lower() == "skip":
+        notes = ""
+    d = context.user_data.get("suggest_data") or {}
+    name = d.get("name", "").strip()
+    city = d.get("city", "").strip()
+    stype = d.get("type", "unknown")
+    if not name or not city:
+        await update.message.reply_text("⚠️ Segnalazione incompleta. Riparti da capo con '➕ Segnala ristorante'.")
+        return ConversationHandler.END
+
+    save_suggestion(user.id, name, city, stype, notes)
+    log_usage(user.id, "suggest_submit", city=city)
+
+    await update.message.reply_text("Grazie! ✅ Segnalazione registrata. Dopo verifica potrà finire nella lista.")
+    return ConversationHandler.END
+
+async def segnala_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    log_usage(user.id, "suggest_cancel")
+    await update.message.reply_text("Operazione annullata.", reply_markup=main_keyboard())
+    return ConversationHandler.END
+
+async def followup_job_callback(context: ContextTypes.DEFAULT_TYPE):
+    data = context.job.data or {}
+    chat_id = data.get("chat_id")
+    rid = data.get("rid")
+    if not chat_id or not rid:
+        return
+    # chiedi feedback
+    try:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="🧡 Com'è andata al ristorante che avevi prenotato? Il tuo feedback aiuta la community.",
+            reply_markup=followup_rating_buttons(int(rid)),
+        )
+        # log evento (non abbiamo user_id qui: lo mettiamo in data quando scheduliamo)
+        uid = data.get("user_id")
+        if uid:
+            log_usage(int(uid), "followup_sent", restaurant_id=int(rid))
+    except Exception:
+        pass
 
 
 # ==========================
@@ -844,6 +1075,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [
                 [InlineKeyboardButton("⭐ Preferito", callback_data=f"fav:{rid}"),
                  InlineKeyboardButton("⚠️ Segnala", callback_data=f"rep:{rid}")],
+                [InlineKeyboardButton("✅ Ho prenotato", callback_data=f"book:{rid}"),
+                 InlineKeyboardButton("❌ Non utile", callback_data=f"notuse:{rid}")],
                 [InlineKeyboardButton("📷 Aggiungi foto", callback_data=f"photo:{rid}")],
             ]
         )
@@ -853,6 +1086,45 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if photos:
             await query.message.reply_photo(photos[0], caption="📷 Foto dalla community")
         return
+    if data.startswith("book:"):
+        rid = int(data.split(":", 1)[1])
+        city_ctx = context.user_data.get("last_city_search")
+        log_usage(user.id, "feedback_booked", city=city_ctx, restaurant_id=rid)
+
+        # schedula follow-up dopo 72 ore
+        try:
+            context.job_queue.run_once(
+                followup_job_callback,
+                when=timedelta(hours=72),
+                data={"chat_id": query.message.chat_id, "rid": rid, "user_id": user.id},
+                name=f"followup_{user.id}_{rid}",
+            )
+        except Exception:
+            pass
+
+        await query.message.reply_text("✅ Perfetto. Tra qualche giorno ti chiederemo com'è andata 🙌")
+        return
+
+    if data.startswith("notuse:"):
+        rid = int(data.split(":", 1)[1])
+        city_ctx = context.user_data.get("last_city_search")
+        log_usage(user.id, "feedback_not_useful", city=city_ctx, restaurant_id=rid)
+        await query.message.reply_text("Ricevuto 👍 Questo ci aiuta a migliorare.")
+        return
+
+    if data.startswith("rategood:") or data.startswith("ratewarn:") or data.startswith("ratebad:"):
+        parts = data.split(":", 1)
+        tag = parts[0]
+        rid = int(parts[1]) if len(parts) > 1 else None
+        evt = {"rategood": "followup_good", "ratewarn": "followup_warn", "ratebad": "followup_bad"}.get(tag, "followup_unknown")
+        log_usage(user.id, evt, restaurant_id=rid)
+        try:
+            await query.edit_message_text("Grazie! 💚 Feedback registrato.")
+        except Exception:
+            await query.message.reply_text("Grazie! 💚 Feedback registrato.")
+        return
+
+
 
     if data.startswith("listpage:"):
         page = int(data.split(":", 1)[1])
@@ -945,6 +1217,24 @@ def build_application():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stats", stats))
+
+    # Segnalazioni utenti
+    segnala_conv = ConversationHandler(
+        entry_points=[
+            CommandHandler("segnala", segnala_start),
+            MessageHandler(filters.Regex("^➕ Segnala ristorante$"), segnala_start),
+        ],
+        states={
+            SEGNALA_NOME: [MessageHandler(filters.TEXT & ~filters.COMMAND, segnala_nome)],
+            SEGNALA_CITTA: [MessageHandler(filters.TEXT & ~filters.COMMAND, segnala_citta)],
+            SEGNALA_TIPO: [CallbackQueryHandler(segnala_tipo, pattern=r"^stype:")],
+            SEGNALA_NOTE: [MessageHandler(filters.TEXT & ~filters.COMMAND, segnala_note)],
+        },
+        fallbacks=[MessageHandler(filters.Regex("^❌ Annulla$"), segnala_cancel), CommandHandler("cancel", segnala_cancel)],
+        allow_reentry=True,
+    )
+    app.add_handler(segnala_conv)
+
 
     app.add_handler(MessageHandler(filters.LOCATION, handle_location))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
