@@ -109,3 +109,29 @@ async def telegram_webhook(secret: str, request: Request):
     update = Update.de_json(data, application.bot)
     await application.process_update(update)
     return {"ok": True}
+
+@app.get("/api/restaurants")
+async def api_restaurants():
+
+    import sqlite3
+
+    conn = sqlite3.connect("restaurants.db")
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT name, city, rating
+        FROM restaurants
+        LIMIT 20
+    """)
+
+    rows = cur.fetchall()
+
+    return [
+        {
+            "name": r["name"],
+            "city": r["city"],
+            "rating": r["rating"]
+        }
+        for r in rows
+    ]
