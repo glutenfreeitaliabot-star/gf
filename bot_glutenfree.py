@@ -7,12 +7,12 @@ from typing import Optional, List, Tuple
 
 
 from telegram import (
-    WebAppInfo,
     Update,
     KeyboardButton,
     ReplyKeyboardMarkup,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    WebAppInfo,
 )
 from telegram.ext import (
     Application,
@@ -776,7 +776,7 @@ async def segnala_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def segnala_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     log_usage(user.id, "suggest_cancel")
-    await update.message.reply_text("Operazione annullata.", reply_markup=miniapp_button)
+    await update.message.reply_text("Operazione annullata.", reply_markup=main_keyboard())
     return ConversationHandler.END
 
 async def followup_job_callback(context: ContextTypes.DEFAULT_TYPE):
@@ -800,18 +800,20 @@ async def followup_job_callback(context: ContextTypes.DEFAULT_TYPE):
         pass
 
 
-# ==========================
-# HANDLERS
-# ==========================
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    miniapp_button = InlineKeyboardMarkup([
+def miniapp_keyboard():
+    return InlineKeyboardMarkup([
         [InlineKeyboardButton(
             "🌍 Apri GlutenFree App",
             web_app=WebAppInfo(url="https://glutenfree-miniapp.vercel.app")
         )]
     ])
 
+# ==========================
+# HANDLERS
+# ==========================
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     log_usage(user.id, "start")
 
@@ -823,7 +825,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Usa i pulsanti qui sotto 👇"
     )
     await update.message.reply_text(
-        msg, parse_mode="HTML", reply_markup=miniapp_button, disable_web_page_preview=True
+        msg, parse_mode="HTML", reply_markup=main_keyboard(), disable_web_page_preview=True
+    )
+
+    await update.message.reply_text(
+        "🌍 Apri anche la nuova GlutenFree Mini App:",
+        reply_markup=miniapp_keyboard()
     )
 
 
@@ -864,7 +871,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if text == "🔍 Cerca per città":
         context.user_data["awaiting_city"] = True
-        await update.message.reply_text("Scrivi il nome della città (es: Bari):", reply_markup=miniapp_button)
+        await update.message.reply_text("Scrivi il nome della città (es: Bari):", reply_markup=main_keyboard())
         return
 
     if context.user_data.get("awaiting_city"):
@@ -883,7 +890,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="HTML",
                 reply_markup=kb,
             )
-            await update.message.reply_text("Menu 👇", reply_markup=miniapp_button)
+            await update.message.reply_text("Menu 👇", reply_markup=main_keyboard())
             return
 
         context.user_data["last_list_rows_ids"] = [int(r["id"]) for r in rows]
@@ -892,7 +899,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         msg, kb = build_list_message(rows, context.user_data["last_list_title"], page=0, user_location=None)
         await update.message.reply_text(msg, parse_mode="HTML", reply_markup=kb)
-        await update.message.reply_text("Menu 👇", reply_markup=miniapp_button)
+        await update.message.reply_text("Menu 👇", reply_markup=main_keyboard())
         return
 
     if text == "📍 Vicino a me":
@@ -903,7 +910,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get("awaiting_radius"):
         if text == "❌ Annulla":
             context.user_data["awaiting_radius"] = False
-            await update.message.reply_text("Ok, annullato.", reply_markup=miniapp_button)
+            await update.message.reply_text("Ok, annullato.", reply_markup=main_keyboard())
             return
 
         if "km" in text.lower():
@@ -931,9 +938,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == "⭐ I miei preferiti":
         favs = get_favorites(user.id)
         if not favs:
-            await update.message.reply_text("Non hai ancora preferiti ⭐", reply_markup=miniapp_button)
+            await update.message.reply_text("Non hai ancora preferiti ⭐", reply_markup=main_keyboard())
             return
-        await update.message.reply_text(f"Hai <b>{len(favs)}</b> preferiti:", parse_mode="HTML", reply_markup=miniapp_button)
+        await update.message.reply_text(f"Hai <b>{len(favs)}</b> preferiti:", parse_mode="HTML", reply_markup=main_keyboard())
         for r in favs[:10]:
             detail = format_restaurant_detail(r)
             await update.message.reply_text(detail, parse_mode="HTML", disable_web_page_preview=True)
@@ -988,12 +995,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Al momento non ci sono prodotti gluten free segnalati.\n\n"
             "👉 Entra nel gruppo: @GlutenfreeItalia_bot",
             parse_mode="HTML",
-            reply_markup=miniapp_button,
+            reply_markup=main_keyboard(),
             disable_web_page_preview=True,
         )
         return
 
-    await update.message.reply_text("Usa il menu 👇", reply_markup=miniapp_button)
+    await update.message.reply_text("Usa il menu 👇", reply_markup=main_keyboard())
 
 
 async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1015,7 +1022,7 @@ async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML",
             reply_markup=kb,
         )
-        await update.message.reply_text("Menu 👇", reply_markup=miniapp_button)
+        await update.message.reply_text("Menu 👇", reply_markup=main_keyboard())
         return
 
     context.user_data["last_nearby_coords"] = (_to_float(lat_user), _to_float(lon_user))
@@ -1030,7 +1037,7 @@ async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_location=context.user_data.get("last_nearby_coords"),
     )
     await update.message.reply_text(msg, parse_mode="HTML", reply_markup=kb)
-    await update.message.reply_text("Menu 👇", reply_markup=miniapp_button)
+    await update.message.reply_text("Menu 👇", reply_markup=main_keyboard())
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1038,14 +1045,14 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user.id not in pending_photo_for_user:
         await update.message.reply_text(
             "Per collegare una foto ad un locale, apri i dettagli e premi '📷 Aggiungi foto'.",
-            reply_markup=miniapp_button,
+            reply_markup=main_keyboard(),
         )
         return
 
     rid = pending_photo_for_user.pop(user.id)
     photo = update.message.photo[-1]
     add_photo_record(user.id, rid, photo.file_id)
-    await update.message.reply_text("📷 Foto salvata, grazie!", reply_markup=miniapp_button)
+    await update.message.reply_text("📷 Foto salvata, grazie!", reply_markup=main_keyboard())
 
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1067,7 +1074,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             r = cur.fetchone()
 
         if not r:
-            await query.message.reply_text("⚠️ Locale non trovato.", reply_markup=miniapp_button)
+            await query.message.reply_text("⚠️ Locale non trovato.", reply_markup=main_keyboard())
             return
 
         city_ctx = context.user_data.get("last_city_search")
@@ -1139,7 +1146,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ids = context.user_data.get("last_list_rows_ids") or []
         title = context.user_data.get("last_list_title") or "Risultati"
         if not ids:
-            await query.message.reply_text("⚠️ Lista non disponibile, rifai la ricerca.", reply_markup=miniapp_button)
+            await query.message.reply_text("⚠️ Lista non disponibile, rifai la ricerca.", reply_markup=main_keyboard())
             return
 
         with closing(get_conn()) as conn:
@@ -1162,13 +1169,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("fav:"):
         rid = int(data.split(":", 1)[1])
         add_favorite(user.id, rid)
-        await query.message.reply_text("⭐ Aggiunto ai preferiti.", reply_markup=miniapp_button)
+        await query.message.reply_text("⭐ Aggiunto ai preferiti.", reply_markup=main_keyboard())
         return
 
     if data.startswith("rep:"):
         rid = int(data.split(":", 1)[1])
         add_report(user.id, rid, "Segnalazione generica dal bot")
-        await query.message.reply_text("⚠️ Segnalazione registrata. Grazie!", reply_markup=miniapp_button)
+        await query.message.reply_text("⚠️ Segnalazione registrata. Grazie!", reply_markup=main_keyboard())
         return
 
     if data.startswith("photo:"):
@@ -1181,10 +1188,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         val = data.split(":", 1)[1]
         if val == "none":
             set_user_min_rating(user.id, None)
-            await query.message.reply_text(f"Filtro rating disattivato.\n🔎 Filtri attivi: <b>{format_active_filters(get_user_settings(user.id))}</b>", parse_mode="HTML", reply_markup=miniapp_button)
+            await query.message.reply_text(f"Filtro rating disattivato.\n🔎 Filtri attivi: <b>{format_active_filters(get_user_settings(user.id))}</b>", parse_mode="HTML", reply_markup=main_keyboard())
         else:
             set_user_min_rating(user.id, float(val))
-            await query.message.reply_text(f"Rating minimo impostato a {val}⭐.\n🔎 Filtri attivi: <b>{format_active_filters(get_user_settings(user.id))}</b>", parse_mode="HTML", reply_markup=miniapp_button)
+            await query.message.reply_text(f"Rating minimo impostato a {val}⭐.\n🔎 Filtri attivi: <b>{format_active_filters(get_user_settings(user.id))}</b>", parse_mode="HTML", reply_markup=main_keyboard())
         return
         
     if data.startswith("type:"):
@@ -1194,11 +1201,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             set_user_type_filter(user.id, None)
             await query.message.reply_text(
                 "Filtro tipologia disattivato.",
-                reply_markup=miniapp_button
+                reply_markup=main_keyboard()
             )
         else:
             set_user_type_filter(user.id, val)
-            await query.message.reply_text(f"Tipologia impostata: {val}\n🔎 Filtri attivi: <b>{format_active_filters(get_user_settings(user.id))}</b>", parse_mode="HTML", reply_markup=miniapp_button)
+            await query.message.reply_text(f"Tipologia impostata: {val}\n🔎 Filtri attivi: <b>{format_active_filters(get_user_settings(user.id))}</b>", parse_mode="HTML", reply_markup=main_keyboard())
         return
 
 
@@ -1206,7 +1213,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         payload = data.split(":", 1)[1].strip()
         log_usage(user.id, "suggest_city", city=payload)
 
-        await query.message.reply_text("✅ Segnalazione inviata all’admin.", reply_markup=miniapp_button)
+        await query.message.reply_text("✅ Segnalazione inviata all’admin.", reply_markup=main_keyboard())
 
         if ADMIN_CHAT_ID:
             try:
