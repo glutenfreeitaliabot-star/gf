@@ -39,6 +39,7 @@ PAGE_SIZE = 5
 pending_photo_for_user = {}
 
 RADIUS_OPTIONS = [1, 3, 5, 10, 15, 20]
+MINIAPP_URL = os.getenv("MINIAPP_URL", "https://glutenfree-miniapp.vercel.app")
 
 
 def format_active_filters(settings: dict) -> str:
@@ -481,9 +482,16 @@ def main_keyboard():
         [
             ["🔍 Cerca per città", "📍 Vicino a me"],
             ["⭐ I miei preferiti", "⚙️ Filtri"],
-            ["➕ Segnala ristorante", "🛒 Shop"],
+            [KeyboardButton("🌍 Mini App", web_app=WebAppInfo(url=MINIAPP_URL)), "🛒 Shop"],
+            ["➕ Segnala ristorante"],
         ],
         resize_keyboard=True,
+    )
+
+
+def miniapp_inline_keyboard():
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("🌍 Apri GlutenFree App", web_app=WebAppInfo(url=MINIAPP_URL))]]
     )
 
 
@@ -800,15 +808,6 @@ async def followup_job_callback(context: ContextTypes.DEFAULT_TYPE):
         pass
 
 
-
-def miniapp_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(
-            "🌍 Apri GlutenFree App",
-            web_app=WebAppInfo(url="https://glutenfree-miniapp.vercel.app")
-        )]
-    ])
-
 # ==========================
 # HANDLERS
 # ==========================
@@ -826,11 +825,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(
         msg, parse_mode="HTML", reply_markup=main_keyboard(), disable_web_page_preview=True
-    )
-
-    await update.message.reply_text(
-        "🌍 Apri anche la nuova GlutenFree Mini App:",
-        reply_markup=miniapp_keyboard()
     )
 
 
@@ -989,6 +983,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=kb,
         )
         return
+    if text == "🌍 Mini App":
+        await update.message.reply_text(
+            "Apri la Mini App qui sotto 👇",
+            reply_markup=miniapp_inline_keyboard(),
+        )
+        return
+
     if text == "🛒 Shop":
         await update.message.reply_text(
             "🛒 <b>Shop Gluten Free</b>\n\n"
@@ -1231,6 +1232,7 @@ def build_application():
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("app", start))
     app.add_handler(CommandHandler("stats", stats))
 
     # Segnalazioni utenti
