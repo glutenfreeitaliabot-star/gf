@@ -3,7 +3,7 @@ import hashlib
 import hmac
 import json
 import os
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, closing
 from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import parse_qsl
@@ -13,11 +13,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from telegram import Update
 
 from bot_glutenfree import (
+    ADMIN_TELEGRAM_ID,
+    CONTACT_LINK,
     PREMIUM_BOT_LINK,
     build_application,
     ensure_schema,
+    get_conn,
     get_quota_payload,
+    has_premium_access,
     increment_daily_searches,
+    is_admin_user,
+    is_user_premium,
+    log_usage_event,
     query_nearby,
     query_restaurants_text,
     serialize_restaurant,
@@ -78,6 +85,72 @@ def maybe_increment_quota(user_id: int) -> dict:
     return get_quota_payload(user_id)
 
 
+
+
+def serialize_restaurant_public(row):
+    item = serialize_restaurant(row)
+    return {
+        "id": item["id"],
+        "name": item["name"],
+        "city": item["city"],
+        "types": item["types"],
+        "rating": item["rating"],
+        "rating_online_gf": item["rating_online_gf"],
+        "notes": item["notes"],
+        "lat": item["lat"],
+        "lon": item["lon"],
+    }
+
+
+def get_restaurant_by_id(restaurant_id: int):
+    with closing(get_conn()) as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM restaurants WHERE id = ?", (restaurant_id,))
+        return cur.fetchone()
+
+
+def build_admin_dashboard() -> dict:
+    with closing(get_conn()) as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) AS c FROM restaurants")
+        restaurants_total = cur.fetchone()["c"]
+
+        cur.execute("SELECT COUNT(*) AS c FROM premium_subscriptions WHERE status = 'active'")
+        premium_active = cur.fetchone()["c"]
+
+        cur.execute("SELECT COUNT(DISTINCT user_id) AS c FROM search_usage_daily")
+        unique_search_users = cur.fetchone()["c"]
+
+        cur.execute("SELECT COALESCE(SUM(searches), 0) AS c FROM search_usage_daily WHERE day = ?", (datetime.now(timezone.utc).date().isoformat(),))
+        searches_today = cur.fetchone()["c"]
+
+        cur.execute("SELECT COALESCE(SUM(searches), 0) AS c FROM search_usage_daily")
+        searches_total = cur.fetchone()["c"]
+
+        cur.execute("SELECT user_id, status, starts_at, expires_at, payment_source, updated_at FROM premium_subscriptions ORDER BY updated_at DESC LIMIT 100")
+        premium_rows = [dict(r) for r in cur.fetchall()]
+
+        cur.execute("SELECT day, COALESCE(SUM(searches), 0) AS searches FROM search_usage_daily GROUP BY day ORDER BY day DESC LIMIT 14")
+        searches_by_day = [dict(r) for r in cur.fetchall()]
+
+        cur.execute("SELECT event_type, COUNT(*) AS count FROM usage_events GROUP BY event_type ORDER BY count DESC LIMIT 20")
+        events_breakdown = [dict(r) for r in cur.fetchall()]
+
+        cur.execute("SELECT user_id, event_type, event_value, created_at FROM usage_events ORDER BY id DESC LIMIT 120")
+        recent_events = [dict(r) for r in cur.fetchall()]
+
+    return {
+        "restaurants_total": restaurants_total,
+        "premium_active": premium_active,
+        "unique_search_users": unique_search_users,
+        "searches_today": searches_today,
+        "searches_total": searches_total,
+        "premium_rows": premium_rows,
+        "searches_by_day": searches_by_day,
+        "events_breakdown": events_breakdown,
+        "recent_events": recent_events,
+    }
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global telegram_app
@@ -116,16 +189,68 @@ async def api_premium_link():
     return {"premium_bot_link": PREMIUM_BOT_LINK}
 
 
+
+
+@app.get("/api/me")
+async def api_me(init_data: str = Query(default=""), user_id: int = Query(default=0)):
+    parsed = validate_telegram_init_data(init_data)
+    uid = resolve_user_id(init_data, user_id)
+    user = parsed.get("user") if isinstance(parsed, dict) else None
+    return {
+        "ok": True,
+        "user_id": uid,
+        "username": (user or {}).get("username", ""),
+        "first_name": (user or {}).get("first_name", ""),
+        "is_admin": is_admin_user(uid),
+        "is_premium": has_premium_access(uid),
+        "quota": get_quota_payload(uid),
+        "contact_link": CONTACT_LINK,
+        "admin_telegram_id_configured": bool(ADMIN_TELEGRAM_ID),
+    }
+
 @app.get("/api/quota")
 async def api_quota(init_data: str = Query(default=""), user_id: int = Query(default=0)):
     uid = resolve_user_id(init_data, user_id)
     return get_quota_payload(uid)
 
 
+
+
+@app.get("/api/admin/dashboard")
+async def api_admin_dashboard(init_data: str = Query(default=""), user_id: int = Query(default=0)):
+    uid = resolve_user_id(init_data, user_id)
+    if not is_admin_user(uid):
+        raise HTTPException(status_code=403, detail="Admin only")
+    return {"ok": True, "dashboard": build_admin_dashboard()}
+
+
+@app.post("/api/admin/test-premium")
+async def api_admin_test_premium(init_data: str = Query(default=""), user_id: int = Query(default=0)):
+    uid = resolve_user_id(init_data, user_id)
+    if not is_admin_user(uid):
+        raise HTTPException(status_code=403, detail="Admin only")
+    from bot_glutenfree import activate_premium
+    activate_premium(uid)
+    log_usage_event(uid, "admin_force_premium", "self")
+    return {"ok": True, "message": "Premium attivato per il tuo utente admin."}
+
+
+@app.get("/api/restaurants/{restaurant_id}/details")
+async def api_restaurant_details(restaurant_id: int, init_data: str = Query(default=""), user_id: int = Query(default=0)):
+    uid = resolve_user_id(init_data, user_id)
+    if not has_premium_access(uid):
+        raise HTTPException(status_code=403, detail="Premium required")
+    row = get_restaurant_by_id(restaurant_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Restaurant not found")
+    item = serialize_restaurant(row)
+    log_usage_event(uid, "restaurant_details_open", str(restaurant_id))
+    return {"ok": True, "item": item}
+
 @app.get("/api/restaurants")
 async def api_restaurants(q: str = Query(default=""), limit: int = Query(default=50, ge=1, le=200)):
     rows = query_restaurants_text(q, limit=limit)
-    return [serialize_restaurant(r) for r in rows]
+    return [serialize_restaurant_public(r) for r in rows]
 
 
 @app.get("/api/restaurants/search")
@@ -142,7 +267,8 @@ async def api_restaurants_search(
 
     qp = maybe_increment_quota(uid)
     rows = query_restaurants_text(q, limit=limit)
-    return {"ok": True, "paywall": False, "quota": qp, "items": [serialize_restaurant(r) for r in rows]}
+    log_usage_event(uid, "api_search_text", q or "")
+    return {"ok": True, "paywall": False, "quota": qp, "items": [serialize_restaurant_public(r) for r in rows]}
 
 
 @app.get("/api/restaurants/nearby")
@@ -161,6 +287,7 @@ async def api_restaurants_nearby(
 
     qp = maybe_increment_quota(uid)
     rows = query_nearby(lat, lon, radius_km=radius_km, limit=limit)
+    log_usage_event(uid, "api_search_nearby", f"{lat},{lon}")
     items = []
     for distance_km, row in rows:
         item = serialize_restaurant(row)

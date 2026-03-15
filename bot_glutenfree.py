@@ -33,6 +33,8 @@ PREMIUM_BOT_LINK = os.getenv("PREMIUM_BOT_LINK", "https://t.me/glutenfreeitaliab
 PREMIUM_PRICE_STARS = int(os.getenv("PREMIUM_PRICE_STARS", "299"))
 PREMIUM_DURATION_DAYS = int(os.getenv("PREMIUM_DURATION_DAYS", "30"))
 FREE_SEARCHES_PER_DAY = int(os.getenv("FREE_SEARCHES_PER_DAY", "3"))
+ADMIN_TELEGRAM_ID = int(os.getenv("ADMIN_TELEGRAM_ID", "0") or 0)
+CONTACT_LINK = os.getenv("CONTACT_LINK", "https://t.me/glutenfreeitaliabot")
 DB_PATH = "restaurants.db"
 
 
@@ -73,6 +75,8 @@ def ensure_schema() -> None:
         _safe_add_column(cur, "restaurants", "rating_online_gf REAL")
         _safe_add_column(cur, "restaurants", "types TEXT")
         _safe_add_column(cur, "restaurants", "phone TEXT")
+        _safe_add_column(cur, "restaurants", "website TEXT")
+        _safe_add_column(cur, "restaurants", "google_maps_url TEXT")
 
         cur.execute(
             """
@@ -94,6 +98,18 @@ def ensure_schema() -> None:
                 day TEXT NOT NULL,
                 searches INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (user_id, day)
+            )
+            """
+        )
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS usage_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                event_type TEXT NOT NULL,
+                event_value TEXT,
+                created_at TEXT NOT NULL
             )
             """
         )
@@ -149,7 +165,27 @@ def _today_utc() -> str:
     return datetime.now(timezone.utc).date().isoformat()
 
 
+def is_admin_user(user_id: int) -> bool:
+    return bool(ADMIN_TELEGRAM_ID and user_id and int(user_id) == ADMIN_TELEGRAM_ID)
+
+
+def has_premium_access(user_id: int) -> bool:
+    return is_admin_user(user_id) or is_user_premium(user_id)
+
+
+def log_usage_event(user_id: int, event_type: str, event_value: str = "") -> None:
+    with closing(get_conn()) as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO usage_events (user_id, event_type, event_value, created_at) VALUES (?, ?, ?, ?)",
+            (user_id or 0, event_type, event_value[:500], datetime.now(timezone.utc).isoformat()),
+        )
+        conn.commit()
+
+
 def is_user_premium(user_id: int) -> bool:
+    if is_admin_user(user_id):
+        return True
     if not user_id:
         return False
     with closing(get_conn()) as conn:
@@ -212,7 +248,7 @@ def increment_daily_searches(user_id: int) -> None:
 
 
 def get_quota_payload(user_id: int) -> dict:
-    premium = is_user_premium(user_id)
+    premium = has_premium_access(user_id)
     used = get_used_searches_today(user_id)
     remaining = 999999 if premium else max(0, FREE_SEARCHES_PER_DAY - used)
     return {
@@ -236,6 +272,8 @@ def serialize_restaurant(row: sqlite3.Row) -> dict:
         "notes": row["notes"] or "",
         "types": row["types"] or "",
         "phone": row["phone"] or "",
+        "website": row["website"] or "" if "website" in row.keys() else "",
+        "google_maps_url": row["google_maps_url"] or "" if "google_maps_url" in row.keys() else "",
         "rating": row["rating"],
         "rating_online_gf": row["rating_online_gf"] if "rating_online_gf" in row.keys() else None,
         "lat": lat,
@@ -379,6 +417,21 @@ async def premium_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_premium_invoice(update, context)
 
 
+async def myid_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    premium_state = "attivo" if has_premium_access(user.id) else "non attivo"
+    admin_state = "sì" if is_admin_user(user.id) else "no"
+    await update.message.reply_text(
+        (
+            f"Il tuo Telegram ID è: <b>{user.id}</b>\n"
+            f"Premium: <b>{premium_state}</b>\n"
+            f"Admin: <b>{admin_state}</b>"
+        ),
+        parse_mode="HTML",
+        reply_markup=reply_home_keyboard(),
+    )
+
+
 async def send_premium_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_invoice(
         chat_id=update.effective_chat.id,
@@ -408,6 +461,7 @@ async def precheckout_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 async def successful_payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     activate_premium(user.id)
+    log_usage_event(user.id, "premium_payment_success", "telegram_stars")
     await update.message.reply_text(
         f"✅ Premium attivato per {PREMIUM_DURATION_DAYS} giorni.\nApri la Mini App per usare ricerche illimitate e dettagli completi.",
         reply_markup=reply_home_keyboard(),
@@ -419,6 +473,7 @@ async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     lat = update.message.location.latitude
     lon = update.message.location.longitude
+    log_usage_event(update.effective_user.id, "bot_search_nearby", f"{lat},{lon}")
     nearby = query_nearby(lat, lon, radius_km=20)
     if not nearby:
         await update.message.reply_text(
@@ -447,6 +502,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if text == "📍 Vicino a me":
+        log_usage_event(update.effective_user.id, "ui_click", "near_me_bot")
         kb = ReplyKeyboardMarkup(
             [[KeyboardButton("Invia posizione 📍", request_location=True)], ["❌ Annulla"]],
             resize_keyboard=True,
@@ -471,6 +527,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get("awaiting_city") or len(text) >= 2:
         context.user_data["awaiting_city"] = False
         rows = query_by_city(text)
+        log_usage_event(update.effective_user.id, "bot_search_city", text)
         await _send_search_results(update, f"🔎 <b>Risultati per:</b> {text}", rows)
         return
 
@@ -480,6 +537,7 @@ def build_application() -> Application:
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("premium", premium_command))
+    app.add_handler(CommandHandler("myid", myid_command))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(PreCheckoutQueryHandler(precheckout_callback))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_callback))

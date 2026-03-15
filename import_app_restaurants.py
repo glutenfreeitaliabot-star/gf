@@ -65,7 +65,9 @@ def import_app_restaurants():
                 rating_online_gf REAL,
                 last_update TEXT,
                 types TEXT,
-                phone TEXT
+                phone TEXT,
+                website TEXT,
+                google_maps_url TEXT
             )
             """
         )
@@ -96,6 +98,8 @@ def import_app_restaurants():
                 notes = _pick(row, "notes")
                 types = _pick(row, "types")
                 phone = _pick(row, "phone")
+                website = _pick(row, "website")
+                google_maps_url = _pick(row, "google_maps_url")
 
                 lat = _pick_float(row, "lat")
                 lon = _pick_float(row, "lon")
@@ -115,15 +119,15 @@ def import_app_restaurants():
                         name, city, address, notes, source,
                         lat, lon,
                         rating, rating_online_gf,
-                        last_update, types, phone
+                        last_update, types, phone, website, google_maps_url
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         name, city, address, notes, "app",
                         lat_db, lon_db,
                         rating, rating_online_gf,
-                        now, types, phone,
+                        now, types, phone, website, google_maps_url,
                     ),
                 )
 
