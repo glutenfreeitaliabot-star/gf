@@ -34,7 +34,7 @@ PREMIUM_PRICE_STARS = int(os.getenv("PREMIUM_PRICE_STARS", "299"))
 PREMIUM_DURATION_DAYS = int(os.getenv("PREMIUM_DURATION_DAYS", "30"))
 FREE_SEARCHES_PER_DAY = int(os.getenv("FREE_SEARCHES_PER_DAY", "3"))
 ADMIN_TELEGRAM_ID = int(os.getenv("ADMIN_TELEGRAM_ID", "0") or 0)
-CONTACT_LINK = os.getenv("CONTACT_LINK", "https://t.me/glutenfreeitaliabot")
+CONTACT_LINK = os.getenv("CONTACT_LINK", "mailto:glutenfreeitaliabot@gmail.com?subject=Glutenfree%20bot%20-%20Ristorante%20gluten%20free")
 DB_PATH = "restaurants.db"
 
 
@@ -114,6 +114,21 @@ def ensure_schema() -> None:
             """
         )
 
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS restaurant_reviews (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                restaurant_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                stars INTEGER NOT NULL,
+                review_text TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(restaurant_id, user_id)
+            )
+            """
+        )
+
         conn.commit()
 
 
@@ -170,7 +185,7 @@ def is_admin_user(user_id: int) -> bool:
 
 
 def has_premium_access(user_id: int) -> bool:
-    return is_admin_user(user_id) or is_user_premium(user_id)
+    return is_user_premium(user_id)
 
 
 def log_usage_event(user_id: int, event_type: str, event_value: str = "") -> None:
@@ -184,8 +199,6 @@ def log_usage_event(user_id: int, event_type: str, event_value: str = "") -> Non
 
 
 def is_user_premium(user_id: int) -> bool:
-    if is_admin_user(user_id):
-        return True
     if not user_id:
         return False
     with closing(get_conn()) as conn:
@@ -217,6 +230,55 @@ def activate_premium(user_id: int) -> None:
                 updated_at=excluded.updated_at
             """,
             (user_id, starts_at.isoformat(), expires_at.isoformat(), starts_at.isoformat()),
+        )
+        conn.commit()
+
+
+def deactivate_premium(user_id: int) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    with closing(get_conn()) as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO premium_subscriptions (user_id, status, starts_at, expires_at, payment_source, updated_at)
+            VALUES (?, 'inactive', ?, ?, 'admin_toggle', ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                status='inactive',
+                expires_at=?,
+                updated_at=?
+            """,
+            (user_id, now, now, now, now, now),
+        )
+        conn.commit()
+
+
+def get_restaurant_community_stats(restaurant_id: int) -> Tuple[Optional[float], int]:
+    with closing(get_conn()) as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT AVG(stars) AS avg_stars, COUNT(*) AS total_reviews FROM restaurant_reviews WHERE restaurant_id = ?",
+            (restaurant_id,),
+        )
+        row = cur.fetchone()
+        avg_stars = round(float(row["avg_stars"]), 1) if row and row["avg_stars"] is not None else None
+        total = int(row["total_reviews"] or 0) if row else 0
+        return avg_stars, total
+
+
+def upsert_restaurant_review(user_id: int, restaurant_id: int, stars: int, review_text: str = "") -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    with closing(get_conn()) as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO restaurant_reviews (restaurant_id, user_id, stars, review_text, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(restaurant_id, user_id) DO UPDATE SET
+                stars=excluded.stars,
+                review_text=excluded.review_text,
+                updated_at=excluded.updated_at
+            """,
+            (restaurant_id, user_id, int(stars), (review_text or "")[:2000], now, now),
         )
         conn.commit()
 
@@ -264,6 +326,7 @@ def get_quota_payload(user_id: int) -> dict:
 
 def serialize_restaurant(row: sqlite3.Row) -> dict:
     lat, lon = _normalize_coords(row["lat"], row["lon"])
+    community_rating, community_reviews_count = get_restaurant_community_stats(int(row["id"]))
     return {
         "id": row["id"],
         "name": row["name"],
@@ -275,7 +338,10 @@ def serialize_restaurant(row: sqlite3.Row) -> dict:
         "website": row["website"] or "" if "website" in row.keys() else "",
         "google_maps_url": row["google_maps_url"] or "" if "google_maps_url" in row.keys() else "",
         "rating": row["rating"],
+        "rating_web": row["rating"],
         "rating_online_gf": row["rating_online_gf"] if "rating_online_gf" in row.keys() else None,
+        "community_rating": community_rating,
+        "community_reviews_count": community_reviews_count,
         "lat": lat,
         "lon": lon,
         "source": row["source"],
@@ -370,9 +436,10 @@ def reply_home_keyboard() -> ReplyKeyboardMarkup:
 
 def _restaurant_line(row: sqlite3.Row, distance_km: Optional[float] = None) -> str:
     rating = f"{float(row['rating']):.1f}⭐" if row["rating"] is not None else "n.d."
+    gf = f" • 🌾 {float(row['rating_online_gf']):.1f}" if row["rating_online_gf"] is not None else ""
     distance = f" • {distance_km:.1f} km" if distance_km is not None else ""
     types = f" • {row['types']}" if row["types"] else ""
-    return f"• <b>{row['name']}</b>\n  📍 {row['city']}{types}\n  ⭐ {rating}{distance}"
+    return f"• <b>{row['name']}</b>\n  📍 {row['city']}{types}\n  🌐 {rating}{gf}{distance}"
 
 
 async def _send_search_results(update: Update, title: str, rows: Iterable[sqlite3.Row], distances: Optional[dict] = None):

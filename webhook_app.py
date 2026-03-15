@@ -10,13 +10,17 @@ from urllib.parse import parse_qsl
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from telegram import Update
+from pydantic import BaseModel
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 
 from bot_glutenfree import (
     ADMIN_TELEGRAM_ID,
     CONTACT_LINK,
+    MINIAPP_URL,
     PREMIUM_BOT_LINK,
+    activate_premium,
     build_application,
+    deactivate_premium,
     ensure_schema,
     get_conn,
     get_quota_payload,
@@ -28,6 +32,7 @@ from bot_glutenfree import (
     query_nearby,
     query_restaurants_text,
     serialize_restaurant,
+    upsert_restaurant_review,
 )
 from import_app_restaurants import import_app_restaurants
 
@@ -40,6 +45,11 @@ if not WEBHOOK_SECRET:
     raise RuntimeError("WEBHOOK_SECRET mancante")
 
 telegram_app = None
+
+
+class ReviewIn(BaseModel):
+    stars: int
+    review_text: str = ""
 
 
 def validate_telegram_init_data(init_data: str) -> Optional[dict]:
@@ -95,7 +105,10 @@ def serialize_restaurant_public(row):
         "city": item["city"],
         "types": item["types"],
         "rating": item["rating"],
+        "rating_web": item["rating_web"],
         "rating_online_gf": item["rating_online_gf"],
+        "community_rating": item["community_rating"],
+        "community_reviews_count": item["community_reviews_count"],
         "notes": item["notes"],
         "lat": item["lat"],
         "lon": item["lon"],
@@ -118,6 +131,9 @@ def build_admin_dashboard() -> dict:
         cur.execute("SELECT COUNT(*) AS c FROM premium_subscriptions WHERE status = 'active'")
         premium_active = cur.fetchone()["c"]
 
+        cur.execute("SELECT COUNT(*) AS c FROM premium_subscriptions")
+        subscriptions_total = cur.fetchone()["c"]
+
         cur.execute("SELECT COUNT(DISTINCT user_id) AS c FROM search_usage_daily")
         unique_search_users = cur.fetchone()["c"]
 
@@ -126,6 +142,9 @@ def build_admin_dashboard() -> dict:
 
         cur.execute("SELECT COALESCE(SUM(searches), 0) AS c FROM search_usage_daily")
         searches_total = cur.fetchone()["c"]
+
+        cur.execute("SELECT COUNT(*) AS c FROM restaurant_reviews")
+        reviews_total = cur.fetchone()["c"]
 
         cur.execute("SELECT user_id, status, starts_at, expires_at, payment_source, updated_at FROM premium_subscriptions ORDER BY updated_at DESC LIMIT 100")
         premium_rows = [dict(r) for r in cur.fetchall()]
@@ -139,16 +158,30 @@ def build_admin_dashboard() -> dict:
         cur.execute("SELECT user_id, event_type, event_value, created_at FROM usage_events ORDER BY id DESC LIMIT 120")
         recent_events = [dict(r) for r in cur.fetchall()]
 
+        cur.execute(
+            """
+            SELECT rr.user_id, rr.restaurant_id, rr.stars, rr.review_text, rr.updated_at, r.name AS restaurant_name
+            FROM restaurant_reviews rr
+            LEFT JOIN restaurants r ON r.id = rr.restaurant_id
+            ORDER BY rr.updated_at DESC
+            LIMIT 100
+            """
+        )
+        recent_reviews = [dict(r) for r in cur.fetchall()]
+
     return {
         "restaurants_total": restaurants_total,
         "premium_active": premium_active,
+        "subscriptions_total": subscriptions_total,
         "unique_search_users": unique_search_users,
         "searches_today": searches_today,
         "searches_total": searches_total,
+        "reviews_total": reviews_total,
         "premium_rows": premium_rows,
         "searches_by_day": searches_by_day,
         "events_breakdown": events_breakdown,
         "recent_events": recent_events,
+        "recent_reviews": recent_reviews,
     }
 
 @asynccontextmanager
@@ -229,10 +262,19 @@ async def api_admin_test_premium(init_data: str = Query(default=""), user_id: in
     uid = resolve_user_id(init_data, user_id)
     if not is_admin_user(uid):
         raise HTTPException(status_code=403, detail="Admin only")
-    from bot_glutenfree import activate_premium
     activate_premium(uid)
     log_usage_event(uid, "admin_force_premium", "self")
     return {"ok": True, "message": "Premium attivato per il tuo utente admin."}
+
+
+@app.post("/api/admin/remove-premium")
+async def api_admin_remove_premium(init_data: str = Query(default=""), user_id: int = Query(default=0)):
+    uid = resolve_user_id(init_data, user_id)
+    if not is_admin_user(uid):
+        raise HTTPException(status_code=403, detail="Admin only")
+    deactivate_premium(uid)
+    log_usage_event(uid, "admin_remove_premium", "self")
+    return {"ok": True, "message": "Premium disattivato per il tuo utente admin."}
 
 
 @app.get("/api/restaurants/{restaurant_id}/details")
@@ -245,6 +287,56 @@ async def api_restaurant_details(restaurant_id: int, init_data: str = Query(defa
         raise HTTPException(status_code=404, detail="Restaurant not found")
     item = serialize_restaurant(row)
     log_usage_event(uid, "restaurant_details_open", str(restaurant_id))
+    return {"ok": True, "item": item}
+
+
+@app.post("/api/restaurants/{restaurant_id}/booked")
+async def api_restaurant_booked(restaurant_id: int, init_data: str = Query(default=""), user_id: int = Query(default=0)):
+    uid = resolve_user_id(init_data, user_id)
+    if not uid:
+        raise HTTPException(status_code=401, detail="User not resolved")
+    row = get_restaurant_by_id(restaurant_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Restaurant not found")
+
+    log_usage_event(uid, "restaurant_booked", str(restaurant_id))
+    sent = False
+    if telegram_app is not None:
+        try:
+            review_url = f"{MINIAPP_URL}/search.html?q={row['name']}"
+            await telegram_app.bot.send_message(
+                chat_id=uid,
+                text=(
+                    f"📅 Hai prenotato da <b>{row['name']}</b>.\n\n"
+                    f"Quando vuoi, torna su <b>Glutenfree bot</b> e lascia una recensione per aiutare la community."
+                ),
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🌍 Apri la Mini App", url=review_url)]]),
+            )
+            sent = True
+        except Exception:
+            sent = False
+    return {"ok": True, "message_sent": sent}
+
+
+@app.post("/api/restaurants/{restaurant_id}/review")
+async def api_restaurant_review(
+    restaurant_id: int,
+    payload: ReviewIn,
+    init_data: str = Query(default=""),
+    user_id: int = Query(default=0),
+):
+    uid = resolve_user_id(init_data, user_id)
+    if not uid:
+        raise HTTPException(status_code=401, detail="User not resolved")
+    if payload.stars < 1 or payload.stars > 5:
+        raise HTTPException(status_code=400, detail="Stars must be between 1 and 5")
+    row = get_restaurant_by_id(restaurant_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Restaurant not found")
+    upsert_restaurant_review(uid, restaurant_id, payload.stars, payload.review_text)
+    log_usage_event(uid, "restaurant_review_submit", f"{restaurant_id}:{payload.stars}")
+    item = serialize_restaurant(row)
     return {"ok": True, "item": item}
 
 @app.get("/api/restaurants")
