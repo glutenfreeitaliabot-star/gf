@@ -537,7 +537,7 @@ def build_application() -> Application:
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("premium", premium_command))
-    app.add_handler(CommandHandler("myid", myid_command))
+    app.add_handler(CommandHandler(["myid", "id"], myid_command))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(PreCheckoutQueryHandler(precheckout_callback))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_callback))
