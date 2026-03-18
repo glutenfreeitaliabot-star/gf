@@ -1,12 +1,11 @@
-
 import hashlib
 import hmac
 import json
 import os
 from contextlib import asynccontextmanager, closing
 from datetime import datetime, timezone
-from typing import Optional
-from urllib.parse import parse_qsl
+from typing import Optional, Tuple
+from urllib.parse import parse_qsl, quote_plus, urlparse
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -27,7 +26,6 @@ from bot_glutenfree import (
     has_premium_access,
     increment_daily_searches,
     is_admin_user,
-    is_user_premium,
     log_usage_event,
     query_nearby,
     query_restaurants_text,
@@ -38,6 +36,7 @@ from import_app_restaurants import import_app_restaurants
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
+ALLOWED_ORIGINS_ENV = os.getenv("ALLOWED_ORIGINS", "")
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN mancante")
@@ -52,6 +51,32 @@ class ReviewIn(BaseModel):
     review_text: str = ""
 
 
+def _build_allowed_origins() -> list[str]:
+    origins = set()
+    if MINIAPP_URL:
+        try:
+            parsed = urlparse(MINIAPP_URL)
+            if parsed.scheme and parsed.netloc:
+                origins.add(f"{parsed.scheme}://{parsed.netloc}")
+        except Exception:
+            pass
+
+    for item in ALLOWED_ORIGINS_ENV.split(","):
+        value = item.strip()
+        if value:
+            origins.add(value)
+
+    origins.update(
+        {
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+        }
+    )
+    return sorted(origins)
+
+
 def validate_telegram_init_data(init_data: str) -> Optional[dict]:
     if not init_data:
         return None
@@ -60,15 +85,18 @@ def validate_telegram_init_data(init_data: str) -> Optional[dict]:
         received_hash = pairs.pop("hash", None)
         if not received_hash:
             return None
+
         data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(pairs.items()))
         secret_key = hmac.new(b"WebAppData", BOT_TOKEN.encode("utf-8"), hashlib.sha256).digest()
         calculated_hash = hmac.new(secret_key, data_check_string.encode("utf-8"), hashlib.sha256).hexdigest()
         if not hmac.compare_digest(calculated_hash, received_hash):
             return None
+
         auth_date = int(pairs.get("auth_date", "0"))
         now_ts = int(datetime.now(timezone.utc).timestamp())
         if auth_date <= 0 or abs(now_ts - auth_date) > 86400:
             return None
+
         if "user" in pairs:
             pairs["user"] = json.loads(pairs["user"])
         return pairs
@@ -76,14 +104,26 @@ def validate_telegram_init_data(init_data: str) -> Optional[dict]:
         return None
 
 
-def resolve_user_id(init_data: str = "", user_id: int = 0) -> int:
-    parsed = validate_telegram_init_data(init_data)
+def _parsed_user_id(parsed: Optional[dict]) -> int:
     if parsed and isinstance(parsed.get("user"), dict):
         try:
             return int(parsed["user"].get("id") or 0)
         except Exception:
-            pass
-    return int(user_id or 0)
+            return 0
+    return 0
+
+
+def resolve_user_id(init_data: str = "", user_id: int = 0) -> int:
+    del user_id
+    return _parsed_user_id(validate_telegram_init_data(init_data))
+
+
+def require_telegram_user(init_data: str = "") -> Tuple[int, dict]:
+    parsed = validate_telegram_init_data(init_data)
+    uid = _parsed_user_id(parsed)
+    if not uid:
+        raise HTTPException(status_code=401, detail="Valid Telegram init_data required")
+    return uid, parsed
 
 
 def maybe_increment_quota(user_id: int) -> dict:
@@ -93,8 +133,6 @@ def maybe_increment_quota(user_id: int) -> dict:
     if not qp["is_premium"]:
         increment_daily_searches(user_id)
     return get_quota_payload(user_id)
-
-
 
 
 def serialize_restaurant_public(row):
@@ -118,14 +156,14 @@ def serialize_restaurant_public(row):
 def get_restaurant_by_id(restaurant_id: int):
     with closing(get_conn()) as conn:
         cur = conn.cursor()
-        cur.execute("SELECT * FROM restaurants WHERE id = ?", (restaurant_id,))
+        cur.execute("SELECT * FROM restaurants WHERE id = ? AND COALESCE(is_active, 1) = 1", (restaurant_id,))
         return cur.fetchone()
 
 
 def build_admin_dashboard() -> dict:
     with closing(get_conn()) as conn:
         cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) AS c FROM restaurants")
+        cur.execute("SELECT COUNT(*) AS c FROM restaurants WHERE COALESCE(is_active, 1) = 1")
         restaurants_total = cur.fetchone()["c"]
 
         cur.execute("SELECT COUNT(*) AS c FROM premium_subscriptions WHERE status = 'active'")
@@ -137,7 +175,8 @@ def build_admin_dashboard() -> dict:
         cur.execute("SELECT COUNT(DISTINCT user_id) AS c FROM search_usage_daily")
         unique_search_users = cur.fetchone()["c"]
 
-        cur.execute("SELECT COALESCE(SUM(searches), 0) AS c FROM search_usage_daily WHERE day = ?", (datetime.now(timezone.utc).date().isoformat(),))
+        today = datetime.now(timezone.utc).date().isoformat()
+        cur.execute("SELECT COALESCE(SUM(searches), 0) AS c FROM search_usage_daily WHERE day = ?", (today,))
         searches_today = cur.fetchone()["c"]
 
         cur.execute("SELECT COALESCE(SUM(searches), 0) AS c FROM search_usage_daily")
@@ -146,10 +185,14 @@ def build_admin_dashboard() -> dict:
         cur.execute("SELECT COUNT(*) AS c FROM restaurant_reviews")
         reviews_total = cur.fetchone()["c"]
 
-        cur.execute("SELECT user_id, status, starts_at, expires_at, payment_source, updated_at FROM premium_subscriptions ORDER BY updated_at DESC LIMIT 100")
+        cur.execute(
+            "SELECT user_id, status, starts_at, expires_at, payment_source, updated_at FROM premium_subscriptions ORDER BY updated_at DESC LIMIT 100"
+        )
         premium_rows = [dict(r) for r in cur.fetchall()]
 
-        cur.execute("SELECT day, COALESCE(SUM(searches), 0) AS searches FROM search_usage_daily GROUP BY day ORDER BY day DESC LIMIT 14")
+        cur.execute(
+            "SELECT day, COALESCE(SUM(searches), 0) AS searches FROM search_usage_daily GROUP BY day ORDER BY day DESC LIMIT 14"
+        )
         searches_by_day = [dict(r) for r in cur.fetchall()]
 
         cur.execute("SELECT event_type, COUNT(*) AS count FROM usage_events GROUP BY event_type ORDER BY count DESC LIMIT 20")
@@ -184,6 +227,7 @@ def build_admin_dashboard() -> dict:
         "recent_reviews": recent_reviews,
     }
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global telegram_app
@@ -205,9 +249,9 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_build_allowed_origins(),
     allow_credentials=False,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -222,15 +266,15 @@ async def api_premium_link():
     return {"premium_bot_link": PREMIUM_BOT_LINK}
 
 
-
-
 @app.get("/api/me")
 async def api_me(init_data: str = Query(default=""), user_id: int = Query(default=0)):
+    del user_id
     parsed = validate_telegram_init_data(init_data)
-    uid = resolve_user_id(init_data, user_id)
+    uid = _parsed_user_id(parsed)
     user = parsed.get("user") if isinstance(parsed, dict) else None
     return {
         "ok": True,
+        "authenticated": bool(uid),
         "user_id": uid,
         "username": (user or {}).get("username", ""),
         "first_name": (user or {}).get("first_name", ""),
@@ -241,17 +285,17 @@ async def api_me(init_data: str = Query(default=""), user_id: int = Query(defaul
         "admin_telegram_id_configured": bool(ADMIN_TELEGRAM_ID),
     }
 
+
 @app.get("/api/quota")
 async def api_quota(init_data: str = Query(default=""), user_id: int = Query(default=0)):
     uid = resolve_user_id(init_data, user_id)
     return get_quota_payload(uid)
 
 
-
-
 @app.get("/api/admin/dashboard")
 async def api_admin_dashboard(init_data: str = Query(default=""), user_id: int = Query(default=0)):
-    uid = resolve_user_id(init_data, user_id)
+    del user_id
+    uid, _ = require_telegram_user(init_data)
     if not is_admin_user(uid):
         raise HTTPException(status_code=403, detail="Admin only")
     return {"ok": True, "dashboard": build_admin_dashboard()}
@@ -259,7 +303,8 @@ async def api_admin_dashboard(init_data: str = Query(default=""), user_id: int =
 
 @app.post("/api/admin/test-premium")
 async def api_admin_test_premium(init_data: str = Query(default=""), user_id: int = Query(default=0)):
-    uid = resolve_user_id(init_data, user_id)
+    del user_id
+    uid, _ = require_telegram_user(init_data)
     if not is_admin_user(uid):
         raise HTTPException(status_code=403, detail="Admin only")
     activate_premium(uid)
@@ -269,7 +314,8 @@ async def api_admin_test_premium(init_data: str = Query(default=""), user_id: in
 
 @app.post("/api/admin/remove-premium")
 async def api_admin_remove_premium(init_data: str = Query(default=""), user_id: int = Query(default=0)):
-    uid = resolve_user_id(init_data, user_id)
+    del user_id
+    uid, _ = require_telegram_user(init_data)
     if not is_admin_user(uid):
         raise HTTPException(status_code=403, detail="Admin only")
     deactivate_premium(uid)
@@ -279,7 +325,8 @@ async def api_admin_remove_premium(init_data: str = Query(default=""), user_id: 
 
 @app.get("/api/restaurants/{restaurant_id}/details")
 async def api_restaurant_details(restaurant_id: int, init_data: str = Query(default=""), user_id: int = Query(default=0)):
-    uid = resolve_user_id(init_data, user_id)
+    del user_id
+    uid, _ = require_telegram_user(init_data)
     if not has_premium_access(uid):
         raise HTTPException(status_code=403, detail="Premium required")
     row = get_restaurant_by_id(restaurant_id)
@@ -292,9 +339,8 @@ async def api_restaurant_details(restaurant_id: int, init_data: str = Query(defa
 
 @app.post("/api/restaurants/{restaurant_id}/booked")
 async def api_restaurant_booked(restaurant_id: int, init_data: str = Query(default=""), user_id: int = Query(default=0)):
-    uid = resolve_user_id(init_data, user_id)
-    if not uid:
-        raise HTTPException(status_code=401, detail="User not resolved")
+    del user_id
+    uid, _ = require_telegram_user(init_data)
     row = get_restaurant_by_id(restaurant_id)
     if not row:
         raise HTTPException(status_code=404, detail="Restaurant not found")
@@ -303,7 +349,7 @@ async def api_restaurant_booked(restaurant_id: int, init_data: str = Query(defau
     sent = False
     if telegram_app is not None:
         try:
-            review_url = f"{MINIAPP_URL}/search.html?q={row['name']}"
+            review_url = f"{MINIAPP_URL}/search.html?q={quote_plus(row['name'])}"
             await telegram_app.bot.send_message(
                 chat_id=uid,
                 text=(
@@ -326,9 +372,8 @@ async def api_restaurant_review(
     init_data: str = Query(default=""),
     user_id: int = Query(default=0),
 ):
-    uid = resolve_user_id(init_data, user_id)
-    if not uid:
-        raise HTTPException(status_code=401, detail="User not resolved")
+    del user_id
+    uid, _ = require_telegram_user(init_data)
     if payload.stars < 1 or payload.stars > 5:
         raise HTTPException(status_code=400, detail="Stars must be between 1 and 5")
     row = get_restaurant_by_id(restaurant_id)
@@ -336,8 +381,10 @@ async def api_restaurant_review(
         raise HTTPException(status_code=404, detail="Restaurant not found")
     upsert_restaurant_review(uid, restaurant_id, payload.stars, payload.review_text)
     log_usage_event(uid, "restaurant_review_submit", f"{restaurant_id}:{payload.stars}")
-    item = serialize_restaurant(row)
+    refreshed = get_restaurant_by_id(restaurant_id) or row
+    item = serialize_restaurant(refreshed)
     return {"ok": True, "item": item}
+
 
 @app.get("/api/restaurants")
 async def api_restaurants(q: str = Query(default=""), limit: int = Query(default=50, ge=1, le=200)):

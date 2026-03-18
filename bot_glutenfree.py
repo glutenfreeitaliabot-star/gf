@@ -1,4 +1,3 @@
-
 import math
 import os
 import re
@@ -34,101 +33,194 @@ PREMIUM_PRICE_STARS = int(os.getenv("PREMIUM_PRICE_STARS", "299"))
 PREMIUM_DURATION_DAYS = int(os.getenv("PREMIUM_DURATION_DAYS", "30"))
 FREE_SEARCHES_PER_DAY = int(os.getenv("FREE_SEARCHES_PER_DAY", "3"))
 ADMIN_TELEGRAM_ID = int(os.getenv("ADMIN_TELEGRAM_ID", "0") or 0)
-CONTACT_LINK = os.getenv("CONTACT_LINK", "mailto:glutenfreeitaliabot@gmail.com?subject=Glutenfree%20bot%20-%20Ristorante%20gluten%20free")
-DB_PATH = "restaurants.db"
+CONTACT_LINK = os.getenv(
+    "CONTACT_LINK",
+    "mailto:glutenfreeitaliabot@gmail.com?subject=Glutenfree%20bot%20-%20Ristorante%20gluten%20free",
+)
+DB_PATH = os.getenv("DB_PATH", "restaurants.db")
+SQLITE_TIMEOUT_SECONDS = float(os.getenv("SQLITE_TIMEOUT_SECONDS", "30"))
 
 
 def get_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=SQLITE_TIMEOUT_SECONDS)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 5000")
+    try:
+        conn.execute("PRAGMA journal_mode = WAL")
+    except sqlite3.DatabaseError:
+        pass
     return conn
+
+
+def _table_columns(cur: sqlite3.Cursor, table: str) -> dict:
+    cur.execute(f"PRAGMA table_info({table})")
+    return {row[1]: row for row in cur.fetchall()}
 
 
 def _safe_add_column(cur: sqlite3.Cursor, table: str, column_sql: str) -> None:
     column_name = column_sql.split()[0]
-    cur.execute(f"PRAGMA table_info({table})")
-    existing = {row[1] for row in cur.fetchall()}
+    existing = _table_columns(cur, table)
     if column_name not in existing:
         cur.execute(f"ALTER TABLE {table} ADD COLUMN {column_sql}")
+
+
+def _create_restaurants_table(cur: sqlite3.Cursor) -> None:
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS restaurants (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            city TEXT NOT NULL,
+            address TEXT,
+            notes TEXT,
+            source TEXT NOT NULL,
+            lat TEXT,
+            lon TEXT,
+            rating REAL,
+            rating_online_gf REAL,
+            last_update TEXT,
+            types TEXT,
+            phone TEXT,
+            website TEXT,
+            google_maps_url TEXT,
+            place_id TEXT,
+            source_uid TEXT,
+            is_active INTEGER NOT NULL DEFAULT 1
+        )
+        """
+    )
+
+    _safe_add_column(cur, "restaurants", "rating_online_gf REAL")
+    _safe_add_column(cur, "restaurants", "types TEXT")
+    _safe_add_column(cur, "restaurants", "phone TEXT")
+    _safe_add_column(cur, "restaurants", "website TEXT")
+    _safe_add_column(cur, "restaurants", "google_maps_url TEXT")
+    _safe_add_column(cur, "restaurants", "place_id TEXT")
+    _safe_add_column(cur, "restaurants", "source_uid TEXT")
+    _safe_add_column(cur, "restaurants", "is_active INTEGER NOT NULL DEFAULT 1")
+
+    cur.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_restaurants_source_uid ON restaurants(source_uid) WHERE source_uid IS NOT NULL"
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_restaurants_active ON restaurants(is_active)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_restaurants_city ON restaurants(city)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_restaurants_name ON restaurants(name)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_restaurants_place_id ON restaurants(place_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_restaurants_google_maps_url ON restaurants(google_maps_url)")
+
+
+def _create_aux_tables(cur: sqlite3.Cursor) -> None:
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS premium_subscriptions (
+            user_id INTEGER PRIMARY KEY,
+            status TEXT NOT NULL,
+            starts_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            payment_source TEXT,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS search_usage_daily (
+            user_id INTEGER NOT NULL,
+            day TEXT NOT NULL,
+            searches INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (user_id, day)
+        )
+        """
+    )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS usage_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            event_type TEXT NOT NULL,
+            event_value TEXT,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+
+
+def _create_restaurant_reviews_table(cur: sqlite3.Cursor) -> None:
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS restaurant_reviews (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            restaurant_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            stars INTEGER NOT NULL,
+            review_text TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(restaurant_id, user_id)
+        )
+        """
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_restaurant_reviews_restaurant_id ON restaurant_reviews(restaurant_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_restaurant_reviews_user_id ON restaurant_reviews(user_id)")
+
+
+def _migrate_restaurant_reviews_if_needed(cur: sqlite3.Cursor) -> None:
+    existing = _table_columns(cur, "restaurant_reviews")
+    if not existing:
+        _create_restaurant_reviews_table(cur)
+        return
+
+    expected = {"id", "restaurant_id", "user_id", "stars", "review_text", "created_at", "updated_at"}
+    if expected.issubset(existing.keys()):
+        cur.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_restaurant_reviews_restaurant_user ON restaurant_reviews(restaurant_id, user_id)"
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_restaurant_reviews_restaurant_id ON restaurant_reviews(restaurant_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_restaurant_reviews_user_id ON restaurant_reviews(user_id)")
+        return
+
+    legacy_table = f"restaurant_reviews_legacy_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
+    cur.execute(f"ALTER TABLE restaurant_reviews RENAME TO {legacy_table}")
+    _create_restaurant_reviews_table(cur)
+
+    legacy_cols = _table_columns(cur, legacy_table)
+    if {"restaurant_id", "general_score", "created_at"}.issubset(legacy_cols.keys()):
+        cur.execute(
+            f"""
+            INSERT OR IGNORE INTO restaurant_reviews (
+                restaurant_id,
+                user_id,
+                stars,
+                review_text,
+                created_at,
+                updated_at
+            )
+            SELECT
+                restaurant_id,
+                -COALESCE(id, rowid),
+                CASE
+                    WHEN CAST(ROUND(COALESCE(general_score, 0)) AS INTEGER) < 1 THEN 1
+                    WHEN CAST(ROUND(COALESCE(general_score, 0)) AS INTEGER) > 5 THEN 5
+                    ELSE CAST(ROUND(COALESCE(general_score, 0)) AS INTEGER)
+                END,
+                COALESCE(source, ''),
+                created_at,
+                created_at
+            FROM {legacy_table}
+            WHERE restaurant_id IS NOT NULL
+            """
+        )
 
 
 def ensure_schema() -> None:
     with closing(get_conn()) as conn:
         cur = conn.cursor()
-
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS restaurants (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                city TEXT NOT NULL,
-                address TEXT,
-                notes TEXT,
-                source TEXT NOT NULL,
-                lat TEXT,
-                lon TEXT,
-                rating REAL,
-                last_update TEXT
-            )
-            """
-        )
-        _safe_add_column(cur, "restaurants", "rating_online_gf REAL")
-        _safe_add_column(cur, "restaurants", "types TEXT")
-        _safe_add_column(cur, "restaurants", "phone TEXT")
-        _safe_add_column(cur, "restaurants", "website TEXT")
-        _safe_add_column(cur, "restaurants", "google_maps_url TEXT")
-
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS premium_subscriptions (
-                user_id INTEGER PRIMARY KEY,
-                status TEXT NOT NULL,
-                starts_at TEXT NOT NULL,
-                expires_at TEXT NOT NULL,
-                payment_source TEXT,
-                updated_at TEXT NOT NULL
-            )
-            """
-        )
-
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS search_usage_daily (
-                user_id INTEGER NOT NULL,
-                day TEXT NOT NULL,
-                searches INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY (user_id, day)
-            )
-            """
-        )
-
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS usage_events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                event_type TEXT NOT NULL,
-                event_value TEXT,
-                created_at TEXT NOT NULL
-            )
-            """
-        )
-
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS restaurant_reviews (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                restaurant_id INTEGER NOT NULL,
-                user_id INTEGER NOT NULL,
-                stars INTEGER NOT NULL,
-                review_text TEXT,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                UNIQUE(restaurant_id, user_id)
-            )
-            """
-        )
-
+        _create_restaurants_table(cur)
+        _create_aux_tables(cur)
+        _migrate_restaurant_reviews_if_needed(cur)
         conn.commit()
 
 
@@ -193,9 +285,21 @@ def log_usage_event(user_id: int, event_type: str, event_value: str = "") -> Non
         cur = conn.cursor()
         cur.execute(
             "INSERT INTO usage_events (user_id, event_type, event_value, created_at) VALUES (?, ?, ?, ?)",
-            (user_id or 0, event_type, event_value[:500], datetime.now(timezone.utc).isoformat()),
+            (user_id or 0, event_type, (event_value or "")[:500], datetime.now(timezone.utc).isoformat()),
         )
         conn.commit()
+
+
+def _parse_dt(value: str) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
+    except Exception:
+        return None
 
 
 def is_user_premium(user_id: int) -> bool:
@@ -207,10 +311,8 @@ def is_user_premium(user_id: int) -> bool:
         row = cur.fetchone()
         if not row or row["status"] != "active":
             return False
-        try:
-            return datetime.fromisoformat(row["expires_at"]) > datetime.now(timezone.utc)
-        except Exception:
-            return False
+        expires_at = _parse_dt(row["expires_at"])
+        return bool(expires_at and expires_at > datetime.now(timezone.utc))
 
 
 def activate_premium(user_id: int) -> None:
@@ -327,24 +429,27 @@ def get_quota_payload(user_id: int) -> dict:
 def serialize_restaurant(row: sqlite3.Row) -> dict:
     lat, lon = _normalize_coords(row["lat"], row["lon"])
     community_rating, community_reviews_count = get_restaurant_community_stats(int(row["id"]))
+    keys = set(row.keys())
     return {
         "id": row["id"],
         "name": row["name"],
         "city": row["city"],
         "address": row["address"] or "",
         "notes": row["notes"] or "",
-        "types": row["types"] or "",
-        "phone": row["phone"] or "",
-        "website": row["website"] or "" if "website" in row.keys() else "",
-        "google_maps_url": row["google_maps_url"] or "" if "google_maps_url" in row.keys() else "",
+        "types": row["types"] or "" if "types" in keys else "",
+        "phone": row["phone"] or "" if "phone" in keys else "",
+        "website": row["website"] or "" if "website" in keys else "",
+        "google_maps_url": row["google_maps_url"] or "" if "google_maps_url" in keys else "",
+        "place_id": row["place_id"] or "" if "place_id" in keys else "",
         "rating": row["rating"],
         "rating_web": row["rating"],
-        "rating_online_gf": row["rating_online_gf"] if "rating_online_gf" in row.keys() else None,
+        "rating_online_gf": row["rating_online_gf"] if "rating_online_gf" in keys else None,
         "community_rating": community_rating,
         "community_reviews_count": community_reviews_count,
         "lat": lat,
         "lon": lon,
         "source": row["source"],
+        "is_active": int(row["is_active"] if "is_active" in keys else 1),
     }
 
 
@@ -373,12 +478,15 @@ def _restaurant_score_for_query(row: sqlite3.Row, q_norm: str) -> int:
     return score
 
 
-def query_restaurants_text(query: str, limit: int = 50) -> List[sqlite3.Row]:
+def _get_active_restaurant_rows() -> List[sqlite3.Row]:
     with closing(get_conn()) as conn:
         cur = conn.cursor()
-        cur.execute("SELECT * FROM restaurants")
-        rows = cur.fetchall()
+        cur.execute("SELECT * FROM restaurants WHERE COALESCE(is_active, 1) = 1")
+        return cur.fetchall()
 
+
+def query_restaurants_text(query: str, limit: int = 50) -> List[sqlite3.Row]:
+    rows = _get_active_restaurant_rows()
     q_norm = _normalize_text(query)
     if not q_norm:
         rows.sort(key=lambda r: (r["rating"] is None, -(r["rating"] or 0), _normalize_text(r["name"])))
@@ -398,11 +506,7 @@ def query_by_city(city: str, limit: int = 12) -> List[sqlite3.Row]:
 
 
 def query_nearby(lat_user: float, lon_user: float, radius_km: float = 20, limit: int = 30) -> List[Tuple[float, sqlite3.Row]]:
-    with closing(get_conn()) as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT * FROM restaurants")
-        rows = cur.fetchall()
-
+    rows = _get_active_restaurant_rows()
     results: List[Tuple[float, sqlite3.Row]] = []
     for row in rows:
         lat, lon = _normalize_coords(row["lat"], row["lon"])
@@ -443,6 +547,9 @@ def _restaurant_line(row: sqlite3.Row, distance_km: Optional[float] = None) -> s
 
 
 async def _send_search_results(update: Update, title: str, rows: Iterable[sqlite3.Row], distances: Optional[dict] = None):
+    if not update.message:
+        return
+
     rows = list(rows)
     if not rows:
         await update.message.reply_text(
@@ -476,8 +583,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Benvenuto in <b>Glutenfree bot</b>.\n"
         "Puoi cercare una città direttamente nel bot oppure aprire la Mini App."
     )
-    await update.message.reply_text(text, parse_mode="HTML", reply_markup=reply_home_keyboard())
-    await update.message.reply_text("Scegli da qui 👇", reply_markup=inline_home_keyboard())
+    if update.message:
+        await update.message.reply_text(text, parse_mode="HTML", reply_markup=reply_home_keyboard())
+        await update.message.reply_text("Scegli da qui 👇", reply_markup=inline_home_keyboard())
 
 
 async def premium_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -486,6 +594,8 @@ async def premium_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def myid_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    if not update.message or not user:
+        return
     premium_state = "attivo" if has_premium_access(user.id) else "non attivo"
     admin_state = "sì" if is_admin_user(user.id) else "no"
     await update.message.reply_text(
@@ -527,6 +637,8 @@ async def precheckout_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def successful_payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    if not update.message or not user:
+        return
     activate_premium(user.id)
     log_usage_event(user.id, "premium_payment_success", "telegram_stars")
     await update.message.reply_text(
@@ -536,7 +648,7 @@ async def successful_payment_callback(update: Update, context: ContextTypes.DEFA
 
 
 async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.location:
+    if not update.message or not update.message.location or not update.effective_user:
         return
     lat = update.message.location.latitude
     lon = update.message.location.longitude
@@ -553,7 +665,7 @@ async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message:
+    if not update.message or not update.effective_user:
         return
     text = (update.message.text or "").strip()
     if not text:
@@ -596,11 +708,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rows = query_by_city(text)
         log_usage_event(update.effective_user.id, "bot_search_city", text)
         await _send_search_results(update, f"🔎 <b>Risultati per:</b> {text}", rows)
-        return
 
 
 def build_application() -> Application:
     ensure_schema()
+    if not BOT_TOKEN:
+        raise RuntimeError("BOT_TOKEN mancante")
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("premium", premium_command))
@@ -611,3 +724,8 @@ def build_application() -> Application:
     app.add_handler(MessageHandler(filters.LOCATION, handle_location))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     return app
+
+
+if __name__ == "__main__":
+    application = build_application()
+    application.run_polling(drop_pending_updates=True)
